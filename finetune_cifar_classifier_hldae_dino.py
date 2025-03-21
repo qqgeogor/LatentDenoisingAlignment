@@ -6,8 +6,7 @@ from torch.utils.data import DataLoader
 import os
 from pathlib import Path
 from tqdm import tqdm
-# from train_mae_cifar10_edm_wsl_correct import MaskedAutoencoderViT
-from train_mae_cifar10_hldae_dino import MaskedAutoencoderViT
+from vit_transformer import MaskedAutoencoderViT
 from torch.cuda.amp import autocast, GradScaler
 
 class CifarClassifier(nn.Module):
