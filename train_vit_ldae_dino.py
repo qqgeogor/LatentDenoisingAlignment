@@ -803,7 +803,7 @@ def train_mae():
 
                 ## this is for observation not loss
                 observed_cos = 1 - F.cosine_similarity(x, target, dim=-1)
-                observed_cos = observed_cos.mean(-1).mean()
+                observed_cos = observed_cos.mean()
 
             # Backward pass with gradient scaling if using AMP
             if args.use_amp:
