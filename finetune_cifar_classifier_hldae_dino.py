@@ -56,15 +56,24 @@ def finetune(args):
     # Initialize GradScaler for AMP
     scaler = GradScaler(enabled=args.use_amp)
 
-    # Data preprocessing for training
-    train_transform = transforms.Compose([
-        # transforms.Resize(int(args.img_size*1.14),interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.RandomCrop(args.img_size, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-    ])
-    
+    if args.img_size == 32:
+        # Data preprocessing for training
+        train_transform = transforms.Compose([
+                # transforms.Resize(int(args.img_size*1.14),interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.RandomCrop(args.img_size, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
+    else:
+        # Data preprocessing for training
+        train_transform = transforms.Compose([
+            transforms.Resize(args.img_size, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.RandomCrop(args.img_size, padding=int(args.img_size * 0.125)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])    
     # Data preprocessing for testing
     test_transform = transforms.Compose([
         transforms.Resize(int(args.img_size),interpolation=transforms.InterpolationMode.BICUBIC),
