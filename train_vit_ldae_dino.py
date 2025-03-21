@@ -24,7 +24,7 @@ import seaborn as sns
 import torch.nn.functional as F
 import contextlib
 import utils_ibot as utils
-from vit_transformer import MaskedAutoencoderViT
+from vit import MaskedAutoencoderViT
 
 # Set matplotlib backend to avoid GUI dependencies
 os.environ['MPLBACKEND'] = 'Agg'
@@ -732,7 +732,6 @@ def train_mae():
 
             # Forward pass with mixed precision
             with autocast() if args.use_amp else contextlib.nullcontext():
-                num_views = args.num_views
                 
                 # Get target features
                 target = model(imgs)
@@ -771,8 +770,10 @@ def train_mae():
                 loss_centroid = -R_nonorm(centroid, if_fast=False)
                 loss = loss_centroid
 
-                loss_cos = 1 - F.cosine_similarity(x, target, dim=-1)
-                loss_cos = loss_cos.mean(-1).mean()
+
+                ## this is for observation not loss
+                observed_cos = 1 - F.cosine_similarity(x, target, dim=-1)
+                observed_cos = observed_cos.mean(-1).mean()
 
             # Backward pass with gradient scaling if using AMP
             if args.use_amp:
@@ -798,7 +799,7 @@ def train_mae():
                 print(
                     f'Epoch: {epoch + 1}, Batch: {i + 1}, '
                     f'Loss: {avg_loss:.3f}, '
-                    f'Loss_cos: {loss_cos:.3f}, '
+                    f'Observed Cos: {observed_cos:.3f}, '
                     f'Momentum: {momentum:.5f}, '
                     f'Weight_decay: {current_weight_decay:.6f}, '
                     f'LR: {current_lr:.6f}'
