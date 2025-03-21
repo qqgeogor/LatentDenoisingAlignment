@@ -26,84 +26,120 @@ from pathlib import Path
 from torch import nn
 from PIL import ImageFilter, ImageOps, Image, ImageDraw
 
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-
-# All rights reserved.
-
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-
 
 import numpy.random as random
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-# from MinkowskiEngine import SparseTensor
 
-# class MinkowskiGRN(nn.Module):
-#     """ GRN layer for sparse tensors.
-#     """
-#     def __init__(self, dim):
-#         super().__init__()
-#         self.gamma = nn.Parameter(torch.zeros(1, dim))
-#         self.beta = nn.Parameter(torch.zeros(1, dim))
+def fast_logdet_svd(x):
+    """Calculate log determinant using SVD."""
+    u, s, v = torch.linalg.svd(x, full_matrices=False)
+    return torch.sum(torch.log(s))
 
-#     def forward(self, x):
-#         cm = x.coordinate_manager
-#         in_key = x.coordinate_map_key
 
-#         Gx = torch.norm(x.F, p=2, dim=0, keepdim=True)
-#         Nx = Gx / (Gx.mean(dim=-1, keepdim=True) + 1e-6)
-#         return SparseTensor(
-#                 self.gamma * (x.F * Nx) + self.beta + x.F,
-#                 coordinate_map_key=in_key,
-#                 coordinate_manager=cm)
+def fast_logdet_cholesky(x):
+    """Calculate log determinant using Cholesky decomposition."""
+    L = torch.linalg.cholesky(x)
+    return 2 * torch.sum(torch.log(torch.diag(L)))
 
-# class MinkowskiDropPath(nn.Module):
-#     """ Drop Path for sparse tensors.
-#     """
 
-#     def __init__(self, drop_prob: float = 0., scale_by_keep: bool = True):
-#         super(MinkowskiDropPath, self).__init__()
-#         self.drop_prob = drop_prob
-#         self.scale_by_keep = scale_by_keep
+class SVDPatchPCANoise(nn.Module):
+    """Module for applying PCA-based noise to image patches."""
     
-#     def forward(self, x):
-#         if self.drop_prob == 0. or not self.training:
-#             return x
-#         cm = x.coordinate_manager
-#         in_key = x.coordinate_map_key
-#         keep_prob = 1 - self.drop_prob
-#         mask = torch.cat([
-#             torch.ones(len(_)) if random.uniform(0, 1) > self.drop_prob
-#             else torch.zeros(len(_)) for _ in x.decomposed_coordinates
-#         ]).view(-1, 1).to(x.device)
-#         if keep_prob > 0.0 and self.scale_by_keep:
-#             mask.div_(keep_prob)
-#         return SparseTensor(
-#                 x.F * mask,
-#                 coordinate_map_key=in_key,
-#                 coordinate_manager=cm)
+    def __init__(self, patch_size=4, noise_scale=0.5, kernel='linear', gamma=1.0):
+        super().__init__()
+        self.patch_size = patch_size
+        self.noise_scale = noise_scale
+        self.ema_cov = None
 
-# class MinkowskiLayerNorm(nn.Module):
-#     """ Channel-wise layer normalization for sparse tensors.
-#     """
+    def inverse_transform(self, x_components):
+        B, N, C = x_components.shape
+        x_components = x_components.reshape(B*N, C)
+        return (x_components @ self.ema_eig_vecs.T).reshape(B, N, C)
 
-#     def __init__(
-#         self,
-#         normalized_shape,
-#         eps=1e-6,
-#     ):
-#         super(MinkowskiLayerNorm, self).__init__()
-#         self.ln = nn.LayerNorm(normalized_shape, eps=eps)
-#     def forward(self, input):
-#         output = self.ln(input.F)
-#         return SparseTensor(
-#             output,
-#             coordinate_map_key=input.coordinate_map_key,
-#             coordinate_manager=input.coordinate_manager)
+    def forward(self, x, return_patches=False):
+        if not self.training:
+            return x
+
+        B, C, H, W = x.shape
+        p = self.patch_size
+        assert H % p == 0 and W % p == 0, "Image dimensions must be divisible by patch size"
+
+        # Extract patches (B, C, H, W) -> (B, num_patches, C*p*p)
+        x_patches = x.unfold(2, p, p).unfold(3, p, p)  # (B, C, H/p, W/p, p, p)
+        x_patches = x_patches.permute(0, 2, 3, 1, 4, 5)  # (B, H/p, W/p, C, p, p)
+        num_patches_h, num_patches_w = x_patches.size(1), x_patches.size(2)
+        x_patches = x_patches.reshape(B, num_patches_h * num_patches_w, C * p * p)
+
+        # Flatten all patches across batch and spatial dimensions
+        all_patches = x_patches.reshape(-1, C*p*p)  # (B*num_patches_total, C*p*p)
+
+        # Compute PCA components
+        with torch.no_grad():
+            mean = all_patches.mean(dim=0)
+            centered = all_patches - mean
+
+            n = centered.size(0)
+            u, s, v = torch.linalg.svd(centered, full_matrices=False)
+            eig_vals = (s**2)/(n-1 + 1e-6)
+            eig_vecs = v.T
+
+            idx = torch.argsort(eig_vals, descending=True)
+            eig_vals = eig_vals[idx]
+            eig_vecs = eig_vecs[:, idx]
+
+            valid_components = torch.sum(eig_vals > 1e-6)
+            self.valid_components = valid_components
+            eig_vals = eig_vals[:valid_components]
+            eig_vecs = eig_vecs[:, :valid_components]
             
+            self.ema_eig_vals = eig_vals
+            self.ema_eig_vecs = eig_vecs
+        
+        noise_coeff = torch.randn(all_patches.size(0), self.valid_components).to(all_patches.device)
+        scaled_noise = noise_coeff * (self.ema_eig_vals.sqrt()).unsqueeze(0)
+        pca_noise = scaled_noise @ self.ema_eig_vecs.T
+
+        # Reshape noise and add to original patches
+        pca_noise = pca_noise.reshape_as(x_patches)
+        noisy_patches = x_patches + pca_noise
+
+        # Reconstruct noisy image from patches
+        noisy_patches = noisy_patches.reshape(B, num_patches_h, num_patches_w, C, p, p)
+        noisy_patches = noisy_patches.permute(0, 3, 1, 4, 2, 5)  # (B, C, H/p, p, W/p, p)
+        noisy_image = noisy_patches.reshape(B, C, H, W)
+
+        if return_patches:
+            components = all_patches @ self.ema_eig_vecs
+            components = components * torch.sqrt(self.ema_eig_vals + 1e-8).unsqueeze(0)
+            x_components = components.reshape_as(x_patches)
+            return noisy_image, x_components
+        else:
+            return noisy_image
+
+
+def R_nonorm(Z, eps=0.5, if_fast=True):
+    """Compute the log-determinant term."""
+    b = Z.size(-2)
+    c = Z.size(-1)
+    
+    cov = Z.transpose(-2, -1) @ Z
+    I = torch.eye(cov.size(-1)).to(Z.device)
+    for i in range(len(Z.shape)-2):
+        I = I.unsqueeze(0)
+    alpha = c/(b*eps)
+    
+    cov = alpha * cov + I
+
+    if if_fast:
+        out = 0.5 * fast_logdet_cholesky(cov)
+    else:
+        out = 0.5 * torch.logdet(cov)
+    return out.mean()
+
+
 class LayerNorm(nn.Module):
     """ LayerNorm that supports two data formats: channels_last (default) or channels_first. 
     The ordering of the dimensions in the inputs. channels_last corresponds to inputs with 

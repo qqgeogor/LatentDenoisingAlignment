@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from functools import partial
 import numpy as np
 from timm.models.vision_transformer import Block, PatchEmbed
-from vit_transformer import SVDPatchPCANoise as PatchPCANoise
+from utils_ibot import SVDPatchPCANoise as PatchPCANoise
 from timm.models.layers import trunc_normal_
 import os
 import matplotlib.pyplot as plt
