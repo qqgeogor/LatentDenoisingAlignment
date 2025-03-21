@@ -35,6 +35,7 @@ import torch.nn.functional as F
 import warnings
 import argparse
 
+
 def fast_logdet_svd(x):
     """Calculate log determinant using SVD."""
     u, s, v = torch.linalg.svd(x, full_matrices=False)

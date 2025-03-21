@@ -58,7 +58,7 @@ def finetune(args):
 
     # Data preprocessing for training
     train_transform = transforms.Compose([
-        transforms.Resize(int(args.img_size*1.14),interpolation=transforms.InterpolationMode.BICUBIC),
+        # transforms.Resize(int(args.img_size*1.14),interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.RandomCrop(args.img_size, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
@@ -87,7 +87,7 @@ def finetune(args):
     backbone = MaskedAutoencoderViT(img_size=args.img_size, patch_size=args.patch_size, in_chans=3,
                  embed_dim=args.embed_dim, depth=args.depth, num_heads=args.num_heads,
                  decoder_embed_dim=args.decoder_embed_dim, decoder_depth=args.decoder_depth, decoder_num_heads=args.decoder_num_heads,
-                 mlp_ratio=args.mlp_ratio, norm_layer=nn.LayerNorm, norm_pix_loss=False, use_checkpoint=True).to(device)
+                 mlp_ratio=args.mlp_ratio, norm_layer=nn.LayerNorm, norm_pix_loss=False, use_checkpoint=False).to(device)
     if args.pretrained_path:
         checkpoint = torch.load(args.pretrained_path)
         backbone.load_state_dict(checkpoint['model_state_dict'],strict=False)
@@ -108,7 +108,7 @@ def finetune(args):
             images, labels = images.to(device), labels.to(device)
             
             # Forward pass with autocast、
-
+            args.use_amp = True
             with autocast(enabled=args.use_amp):
                 outputs = model(images)
                 loss = criterion(outputs, labels)
@@ -185,7 +185,7 @@ def get_args_parser():
     
 
     # Add AMP argument
-    parser.add_argument('--use_amp', action='store_true',default=True,
+    parser.add_argument('--use_amp', action='store_true',
                        help='Use Automatic Mixed Precision training')
     
     return parser

@@ -733,9 +733,9 @@ def train_mae():
             # Forward pass with mixed precision
             with autocast() if args.use_amp else contextlib.nullcontext():
                 
-                # Get target features
-                target = model(imgs)
-                target = F.normalize(target, dim=-1)
+                # # Get target features
+                # target = model(imgs)
+                # target = F.normalize(target, dim=-1)
                 
                 # Generate all views at once
                 all_views = [imgs]  # Include original image as first view
@@ -747,11 +747,15 @@ def train_mae():
                 concatenated_views = torch.cat(all_views, dim=0)
                 
                 # Forward pass on concatenated batch
-                all_features = model(concatenated_views)
+                all_features = model.forward_feature(concatenated_views)
+                all_features = model.proj_head(all_features)
                 all_features = F.normalize(all_features, dim=-1)
                 
                 # Split features back into separate views
                 split_features = torch.split(all_features, imgs.size(0), dim=0)
+                # print(split_features.shape)
+                # exit()
+                # split_features = all_features.reshape(args.num_views+1, -1, all_features.size(-1))
                 
                 # Original image features
                 target = split_features[0]
@@ -769,6 +773,32 @@ def train_mae():
                 # Calculate loss components
                 loss_centroid = -R_nonorm(centroid, if_fast=False)
                 loss = loss_centroid
+
+                # num_views = args.num_views
+                
+
+                # target = model.forward_feature(imgs)
+                # target = model.proj_head(target)
+                # target = F.normalize(target,dim=-1)
+                # centroid = target
+                
+                # for iii in range(args.num_views):
+                #     noised_imgs = pca_noiser(imgs,return_patches=False)
+                #     x = model.forward_feature(noised_imgs)
+                #     x = model.proj_head(x)
+                #     x = F.normalize(x,dim=-1)
+                #     if iii == 0:
+                #         centroid = x
+                #     else:
+                #         centroid +=x
+
+                # centroid = centroid[:,1:]
+                # centroid = centroid/(num_views+1)
+                # centroid = centroid.transpose(0,1)
+                # loss_centroid = -R_nonorm(centroid,if_fast=False)
+
+                # loss = loss_centroid
+
 
 
                 ## this is for observation not loss
