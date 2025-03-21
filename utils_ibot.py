@@ -32,6 +32,8 @@ import numpy.random as random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import warnings
+import argparse
 
 def fast_logdet_svd(x):
     """Calculate log determinant using SVD."""
@@ -721,10 +723,6 @@ def _no_grad_trunc_normal_(tensor, mean, std, a, b):
         tensor.clamp_(min=a, max=b)
         return tensor
 
-
-def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
-    # type: (Tensor, float, float, float, float) -> Tensor
-    return _no_grad_trunc_normal_(tensor, mean, std, a, b)
 
 
 class LARS(torch.optim.Optimizer):
