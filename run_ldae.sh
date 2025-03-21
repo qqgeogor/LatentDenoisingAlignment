@@ -1,1 +1,1 @@
-bash train_vit_ldae_dino.py --use_amp --output_dir ../../autodl-tmp/output/
+python train_vit_ldae_dino.py --use_amp --output_dir ../../autodl-tmp/output/ --resume ../../autodl-tmp/output/*_40.pth 
