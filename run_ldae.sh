@@ -1,0 +1,1 @@
+bash train_vit_ldae_dino.py --use_amp --output_dir ../../autodl-tmp/output/
