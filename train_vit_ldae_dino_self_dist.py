@@ -723,6 +723,7 @@ def train_mae():
         
         for i, (imgs, _) in enumerate(trainloader):
             imgs = imgs.to(device)
+            noised_imgs = pca_noiser(imgs)
             optimizer.zero_grad()
             
             it = i + epoch * len(trainloader)
@@ -738,13 +739,15 @@ def train_mae():
                     target = teacher_model.proj_head(target)
                     target = F.normalize(target, dim=-1)
 
-                view = model.forward_feature(imgs)
+                view = model.forward_feature(noised_imgs)
                 view = model.proj_head(view)
                 view = F.normalize(view, dim=-1)
 
                 loss_tcr = -R_nonorm(view.reshape(-1, view.size(-1))) * 1e-2
                 loss_cos = 1 - torch.cosine_similarity(view, target, dim=-1).mean()
                 loss = loss_tcr + loss_cos
+
+                
                 
             # Backward pass with gradient scaling if using AMP
             if args.use_amp:
