@@ -17,7 +17,7 @@ from pathlib import Path
 import math
 from timm.scheduler.cosine_lr import CosineLRScheduler
 from timm.optim import create_optimizer_v2
-# from ddpm_sampler import DDPMSampler
+from ddpm_sampler import DDPMSampler
 from einops import rearrange
 import seaborn as sns
 import os
@@ -78,7 +78,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.norm_pix_loss = norm_pix_loss
         self.patch_size = patch_size
         self.initialize_weights()
-        # self.sampler = DDPMSampler()
+        self.sampler = DDPMSampler()
 
     def initialize_weights(self):
         # Initialize position embeddings
