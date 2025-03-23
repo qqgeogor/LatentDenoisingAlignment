@@ -62,11 +62,6 @@ class MaskedAutoencoderViT(nn.Module):
             nn.Linear(embed_dim*4, embed_dim),
         )
 
-        self.decoder_proj_head = nn.Sequential(
-            nn.Linear(decoder_embed_dim, decoder_embed_dim*4),
-            nn.GELU(),
-            nn.Linear(decoder_embed_dim*4, decoder_embed_dim),
-        )
         # --------------------------------------------------------------------------
         # MAE encoder specifics
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
@@ -219,8 +214,7 @@ class MaskedAutoencoderViT(nn.Module):
             else:
                 x = blk(x)
         x = self.decoder_norm(x)
-        x = self.decoder_pred(x)
-        x = self.decoder_proj_head(x)
+        x = self.proj_head(x)
         x = x[:, 1:, :]  # Remove CLS token
         
 

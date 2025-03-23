@@ -743,7 +743,7 @@ def train_mae():
                     h_target = teacher_model.forward_feature(imgs)
                     # print(h_target.shape)
                     target = teacher_model.forward_predictor(h_target)
-                    print(target.shape)
+
                 target = F.normalize(target, dim=-1)
                 target = target.detach()
 
