@@ -101,6 +101,20 @@ class SVDPatchPCANoise(nn.Module):
         scaled_noise = noise_coeff * (self.ema_eig_vals.sqrt()).unsqueeze(0)
         pca_noise = scaled_noise @ self.ema_eig_vecs.T
 
+        # Calculate noise energy per patch
+        noise_energy = torch.sum(pca_noise**2, dim=1)  # L2 norm squared per patch
+        
+        # Normalize to create weights - can use different normalization strategies
+        patch_weights = noise_energy / noise_energy.max()  # Simple min-max normalization
+        # Alternative: softmax-based weighting
+        # patch_weights = F.softmax(noise_energy / temperature, dim=0)
+        
+        # Reshape weights to match the original patch dimensions
+        patch_weights = patch_weights.reshape(B, num_patches_h * num_patches_w)
+
+        # Store the weights for later use in the model
+        self.patch_weights = patch_weights
+
         # Reshape noise and add to original patches
         pca_noise = pca_noise.reshape_as(x_patches)
         noisy_patches = x_patches + pca_noise
@@ -139,14 +153,15 @@ def R_nonorm(Z, eps=0.5, if_fast=True):
     return out.mean()
 
 
-def simsiam_loss(z_pred, z_target):
-    """Compute SimSiam loss between predictions and targets."""
+def weighted_simsiam_loss(z_pred, z_target, weights):
     z_pred = F.normalize(z_pred, dim=-1)
     z_target = F.normalize(z_target, dim=-1)
     loss_tcr = -R_nonorm(z_pred) * 1e-2
-    loss_sim = 1 - torch.cosine_similarity(z_pred, z_target, dim=-1).mean()
+    # Weight the similarity based on patch importance
+    cos_sim = torch.cosine_similarity(z_pred, z_target, dim=-1)
+    loss_sim = 1 - (cos_sim * weights).mean()
     out = loss_tcr + loss_sim
-    return out
+    return out, loss_tcr, loss_sim
 
 
 
@@ -723,14 +738,14 @@ def train_mae():
         
         for i, (imgs, _) in enumerate(trainloader):
             imgs = imgs.to(device)
-            noised_imgs = pca_noiser(imgs)
+            noised_images = pca_noiser(imgs)
             optimizer.zero_grad()
             
             it = i + epoch * len(trainloader)
             momentum = momentum_scheduler[it]
             current_weight_decay = weight_decay_scheduler[it]
             optimizer.param_groups[0]['weight_decay'] = current_weight_decay    
-
+            
             # Forward pass with mixed precision
             with autocast() if args.use_amp else contextlib.nullcontext():
                 
@@ -739,15 +754,12 @@ def train_mae():
                     target = teacher_model.proj_head(target)
                     target = F.normalize(target, dim=-1)
 
-                view = model.forward_feature(noised_imgs)
+                view = model.forward_feature(noised_images)
                 view = model.proj_head(view)
                 view = F.normalize(view, dim=-1)
 
-                loss_tcr = -R_nonorm(view.reshape(-1, view.size(-1))) * 1e-2
-                loss_cos = 1 - torch.cosine_similarity(view, target, dim=-1).mean()
-                loss = loss_tcr + loss_cos
-
-                
+              
+                loss, loss_tcr, loss_cos = weighted_simsiam_loss(view, target, model.patch_weights)
                 
             # Backward pass with gradient scaling if using AMP
             if args.use_amp:
