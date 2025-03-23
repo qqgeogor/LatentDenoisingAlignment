@@ -739,32 +739,16 @@ def train_mae():
             # Forward pass with mixed precision
             with autocast() if args.use_amp else contextlib.nullcontext():
                 
-                ## cbow
                 with torch.no_grad():
-                    target = teacher_model.forward_feature(imgs)
-                    target = teacher_model.forward_predictor(target)
-                    target = target.detach()
-
-                target = target.detach()
-
-                view = model.patch_embed(noised_images)
-
-
-                view = view.reshape(-1, view.size(-1))
-                target = target.reshape(-1, target.size(-1))
-                patch_weights = pca_noiser.patch_weights.reshape(-1,1)
-                dummy_patch_weights = torch.ones_like(patch_weights)    
-                # loss, loss_tcr, loss_cos, loss_sim = weighted_simsiam_loss(view, target, dummy_patch_weights)
-                
-                loss2 = (view - target) ** 2
-                loss2 = loss2.mean(dim=-1)
-                loss2 = loss2.mean()
-
-
-                ## skip gram
-                with torch.no_grad():
+                    # target = teacher_model.forward_feature(imgs)[:,1:]
                     target = teacher_model.patch_embed(imgs)
+                    # target = teacher_model.patchify(imgs)
+                    # print(h_target.shape)
+                    # target = teacher_model.forward_predictor(h_target)
+                # h_target = teacher_model.forward_feature(imgs)
+                # target = teacher_model.forward_predictor(h_target)
 
+                # target = F.normalize(target, dim=-1)
                 target = target.detach()
 
                 h_view = model.forward_feature(noised_images)
@@ -773,20 +757,14 @@ def train_mae():
 
                 view = view.reshape(-1, view.size(-1))
                 target = target.reshape(-1, target.size(-1))
-                patch_weights = pca_noiser.patch_weights.reshape(-1,1)
-                dummy_patch_weights = torch.ones_like(patch_weights)    
+                patch_weights = pca_noiser.patch_weights
+                dummy_patch_weights = torch.ones_like(patch_weights).reshape(-1,1)    
                 loss, loss_tcr, loss_cos, loss_sim = weighted_simsiam_loss(view, target, dummy_patch_weights)
                 
-                loss1 = (view - target) ** 2
-                loss1 = loss1.mean(dim=-1)
-                loss1 = loss1.mean()
-
-
-                
-
-                loss = loss1 + loss2
-
-                loss /=2
+                loss = (view - target) ** 2
+                loss = loss * patch_weights.reshape(-1,1)
+                loss = loss.mean(dim=-1)
+                loss = loss.mean()
 
             # Backward pass with gradient scaling if using AMP
             if args.use_amp:
@@ -812,8 +790,6 @@ def train_mae():
                 print(
                     f'Epoch: {epoch + 1}, Batch: {i + 1}, '
                     f'Loss: {avg_loss:.3f}, '
-                    f'Loss1: {loss1:.3f}, '
-                    f'Loss2: {loss2:.3f}, '
                     f'Loss_tcr: {loss_tcr:.3f}, '
                     f'Loss_cos: {loss_cos:.3f}, '
                     f'Loss_sim: {loss_sim:.3f}, '
