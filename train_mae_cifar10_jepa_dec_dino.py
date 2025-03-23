@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from functools import partial
 import numpy as np
 from timm.models.vision_transformer import Block,PatchEmbed
-from utils_ibot import SVDPatchPCANoise as PatchPCANoise
+from vit_transformer import LatentPatchPCANoise,SVDPatchPCANoise as PatchPCANoise
 
 
 from timm.models.layers import trunc_normal_
@@ -20,7 +20,7 @@ from pathlib import Path
 import math
 from timm.scheduler.cosine_lr import CosineLRScheduler
 from timm.optim import create_optimizer_v2
-from karas_sampler import KarrasSampler,get_sigmas_karras
+from karas_sampler import KarrasSampler,get_sigmas_karras,NonEDMPrecondMae as EDMPrecondMae
 from einops import rearrange
 import seaborn as sns
 import os
@@ -31,7 +31,7 @@ matplotlib.use('Agg')  # Set this before importing pyplot
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 
-def R_nonorm(Z,eps=0.5,k=1):
+def R_nonorm(Z,eps=0.5):
     b = Z.shape[-2]
     c = Z.shape[-1]
     
@@ -40,13 +40,10 @@ def R_nonorm(Z,eps=0.5,k=1):
     for i in range(len(Z.shape)-2):
         I = I.unsqueeze(0)
     alpha = c/(b*eps)
-
-    alpha = alpha * k
     
     cov = alpha * cov +  I
 
     out = 0.5*torch.logdet(cov)
-    out = out / k
     return out.mean()
 
 def simsiam_loss(z_pred,z_target):
@@ -76,6 +73,12 @@ class MaskedAutoencoderViT(nn.Module):
         self.decoder_num_heads = decoder_num_heads
         
 
+        self.precond = EDMPrecondMae(self)
+        base_noise_scale = 0.5
+        self.noisers = nn.ModuleList([
+            LatentPatchPCANoise(patch_size=patch_size, noise_scale=base_noise_scale*2**(-i))
+            for i in range(depth)
+        ])
         
         self.proj_head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim*4),
@@ -227,7 +230,7 @@ class MaskedAutoencoderViT(nn.Module):
         x = torch.cat((cls_tokens, x), dim=1)
 
         idx = 0
-        for blk in self.blocks:
+        for blk,noiser in zip(self.blocks,self.noisers):
             # x = noiser(x)
             if self.use_checkpoint and self.training:
                 x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
@@ -430,7 +433,7 @@ def visualize_reconstruction(model, images, mask_ratio=0.75, save_path='reconstr
     # Create save directory if it doesn't exist
     os.makedirs(save_path, exist_ok=True)
     if pca_noiser is None:
-        pca_noiser = PatchPCANoise(patch_size=model.patch_size, noise_scale=3**0.5,kernel='linear',gamma=1.0)
+        pca_noiser = PatchPCANoise(patch_size=model.patch_size, noise_scale=1.,kernel='linear',gamma=1.0)
     noised_images,x_components = pca_noiser(images,return_patches=True)
     model.eval()
     with torch.no_grad():
@@ -554,6 +557,8 @@ def get_args_parser():
                         help='Noise scale for PCA noise')
     parser.add_argument('--ema_decay', default=0.996, type=float,
                         help='EMA decay rate')
+    parser.add_argument('--num_views', default=1, type=int,
+                        help='Number of views for MAE')
     # Model parameters
     parser.add_argument('--model_name', default='mae_base', type=str,
                         help='Name of the model configuration')
@@ -569,7 +574,7 @@ def get_args_parser():
                         help='Number of attention heads')
     parser.add_argument('--decoder_embed_dim', default=192, type=int,
                         help='Decoder embedding dimension')
-    parser.add_argument('--decoder_depth', default=2, type=int,
+    parser.add_argument('--decoder_depth', default=4, type=int,
                         help='Depth of decoder')
     parser.add_argument('--decoder_num_heads', default=3, type=int,
                         help='Number of decoder attention heads')
@@ -603,7 +608,7 @@ def get_args_parser():
                         help='Use gradient checkpointing to save memory')
     
     # Logging and saving
-    parser.add_argument('--output_dir', default='/mnt/d/repo/output/mae_cifar10_jepa_dec_dino',
+    parser.add_argument('--output_dir', default='F:/output/mae_cifar10_jepa_sim_dino2',
                         help='Path where to save checkpoints and logs')
     parser.add_argument('--save_freq', default=10, type=int,
                         help='Frequency of saving checkpoints')
@@ -675,7 +680,7 @@ def train_mae():
         
         # Load Tiny ImageNet dataset using ImageFolder
         trainset = torchvision.datasets.ImageFolder(
-            root=os.path.join(args.data_path),
+            root=os.path.join(args.data_path, f'{args.dataset}/train'),
             transform=transform
         )
 
@@ -783,10 +788,8 @@ def train_mae():
             imgs = imgs.to(device)
             optimizer.zero_grad()
             
-            
+        
             with autocast():
-
-                # teacher forward       
                 with torch.no_grad():
                     # h3,mask3,ids_restore3 = teacher_model.forward_encoder(imgs, mask_ratio=args.mask_ratio)
                     # z3 = teacher_model.forward_decoder(h3,ids_restore3)
@@ -795,32 +798,25 @@ def train_mae():
                 z3 = F.normalize(z3,dim=-1)
                 z3 = z3.detach()
 
+                loss = 0
+                for _ in range(args.num_views):
+                    h1,mask1,ids_restore1 = model.forward_encoder(imgs, mask_ratio=args.mask_ratio)
+                    z1 = model.forward_decoder(h1,ids_restore1)
+                    
+                    z1 = F.normalize(z1,dim=-1)
+                    
+                    
 
+                    # mask = (mask1 > 0).bool() & (mask2 > 0).bool()
+                    mask = (mask1>0).bool()
 
-                h1,mask1,ids_restore1 = model.forward_encoder(imgs, mask_ratio=args.mask_ratio)
-                z1 = model.forward_decoder(h1,ids_restore1)
-                
-                z1 = F.normalize(z1,dim=-1)
-                
-                # with torch.no_grad():
-                #     h2,mask2,ids_restore2 = teacher_model.forward_encoder(imgs, mask_ratio=args.mask_ratio)
-                #     z2 = teacher_model.forward_decoder(h2,ids_restore2)
-
-                # h2,mask2,ids_restore2 = model.forward_encoder(imgs, mask_ratio=args.mask_ratio)
-                # z2 = teacher_model.forward_decoder(h2,ids_restore2)
-
-
-                # mask = (mask1 > 0).bool() & (mask2 > 0).bool()
-                mask = (mask1>0).bool()
-
-                b,n,c = z3.shape
-
-
-                loss_cos = 1 - F.cosine_similarity(z1,z3,dim=-1).mean()
-                
-                
-                loss_tcr = -R_nonorm(z1,k = 1).mean() * 1e-2
-                loss = loss_cos + loss_tcr
+                    # centroid = (z1+z2)/2
+                    centroid = (z1+z3)/2
+                    centroid = centroid[mask]
+                    loss_tcr = -R_nonorm(z1).mean()*1e-2
+                    loss_cos = 1 - F.cosine_similarity(z1,z3,dim=-1).mean()
+                    loss += loss_tcr + loss_cos
+                loss = loss/args.num_views
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -841,8 +837,8 @@ def train_mae():
                 current_lr = optimizer.param_groups[0]['lr']
                 print(f'Epoch: {epoch + 1}, Batch: {i + 1}, '
                       f'Loss: {avg_loss:.3f}, '
-                      f'Loss_cos: {loss_cos:.3f}, '
                       f'Loss_tcr: {loss_tcr:.3f}, '
+                      f'Loss_cos: {loss_cos:.3f}, '
                       f'LR: {current_lr:.6f}')
         
         epoch_loss = total_loss / num_batches
@@ -862,7 +858,6 @@ def train_mae():
             }
             torch.save(save_dict, checkpoint_path)
             
-                
         
         print(f'Epoch {epoch + 1} completed. Average loss: {epoch_loss:.3f}')
 
