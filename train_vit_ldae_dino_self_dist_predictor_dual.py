@@ -739,28 +739,6 @@ def train_mae():
             # Forward pass with mixed precision
             with autocast() if args.use_amp else contextlib.nullcontext():
                 
-
-                ## skip gram
-                with torch.no_grad():
-                    target = teacher_model.patch_embed(imgs)
-
-                target = target.detach()
-
-                h_view = model.forward_feature(noised_images)
-                view = model.forward_predictor(h_view)
-                # view = F.normalize(view, dim=-1)
-
-                view = view.reshape(-1, view.size(-1))
-                target = target.reshape(-1, target.size(-1))
-                patch_weights = pca_noiser.patch_weights.reshape(-1,1)
-                dummy_patch_weights = torch.ones_like(patch_weights)    
-                loss, loss_tcr, loss_cos, loss_sim = weighted_simsiam_loss(view, target, dummy_patch_weights)
-                
-                loss = (view - target) ** 2
-                loss = loss.mean(dim=-1)
-                loss = loss.mean()
-
-
                 ## cbow
                 with torch.no_grad():
                     target = teacher_model.forward_feature(imgs)
@@ -782,7 +760,31 @@ def train_mae():
                 loss2 = loss2.mean(dim=-1)
                 loss2 = loss2.mean()
 
-                loss = loss + loss2
+
+                ## skip gram
+                with torch.no_grad():
+                    target = teacher_model.patch_embed(imgs)
+
+                target = target.detach()
+
+                h_view = model.forward_feature(noised_images)
+                view = model.forward_predictor(h_view)
+                # view = F.normalize(view, dim=-1)
+
+                view = view.reshape(-1, view.size(-1))
+                target = target.reshape(-1, target.size(-1))
+                patch_weights = pca_noiser.patch_weights.reshape(-1,1)
+                dummy_patch_weights = torch.ones_like(patch_weights)    
+                loss, loss_tcr, loss_cos, loss_sim = weighted_simsiam_loss(view, target, dummy_patch_weights)
+                
+                loss1 = (view - target) ** 2
+                loss1 = loss.mean(dim=-1)
+                loss1 = loss.mean()
+
+
+                
+
+                loss = loss1 + loss2
 
                 loss /=2
 
@@ -810,6 +812,8 @@ def train_mae():
                 print(
                     f'Epoch: {epoch + 1}, Batch: {i + 1}, '
                     f'Loss: {avg_loss:.3f}, '
+                    f'Loss1: {loss1:.3f}, '
+                    f'Loss2: {loss2:.3f}, '
                     f'Loss_tcr: {loss_tcr:.3f}, '
                     f'Loss_cos: {loss_cos:.3f}, '
                     f'Loss_sim: {loss_sim:.3f}, '
