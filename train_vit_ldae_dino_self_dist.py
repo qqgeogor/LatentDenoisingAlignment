@@ -159,10 +159,10 @@ def weighted_simsiam_loss(z_pred, z_target, weights):
     loss_tcr = -R_nonorm(z_pred) * 1e-2
     # Weight the similarity based on patch importance
     cos_sim = torch.cosine_similarity(z_pred, z_target, dim=-1)
-    loss_cos = 1 - (cos_sim).mean()
-    loss_sim = (loss_cos * weights).mean()
-    out = loss_tcr + loss_sim
-    return out, loss_tcr, loss_cos,loss_sim
+    loss_cos = 1 - (cos_sim)
+    loss_sim = (loss_cos * weights)
+    out = loss_tcr + loss_sim.mean()
+    return out, loss_tcr, loss_cos.mean(),loss_sim.mean()
 
 
 
