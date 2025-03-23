@@ -1,6 +1,6 @@
 
 
-# python train_vit_ldae_dino_self_dist_predictor_dual.py     --decoder_embed_dim 192     --use_amp     --output_dir /mnt/d/repo/output/cifar_self_dist_predictor_encoder/     --img_size 32     --patch_size 4     --dataset 'cifar10'     --data_path c:/dataset     --save_freq 10 
+# python train_vit_ldae_dino_self_dist_predictor_dual.py     --decoder_embed_dim 192     --use_amp     --output_dir /mnt/d/repo/output/cifar_self_dist_predictor_encoder_dual/     --img_size 32     --patch_size 4     --dataset 'cifar10'     --data_path c:/dataset     --save_freq 10 
 
 
 
