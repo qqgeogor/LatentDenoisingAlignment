@@ -214,10 +214,10 @@ class MaskedAutoencoderViT(nn.Module):
                 x = blk(x)
         x = self.decoder_norm(x)
         x = self.decoder_pred(x)
+        x = self.proj_head(x)
         x = x[:, 1:, :]  # Remove CLS token
         
-        x = self.proj_head(x)
-        
+
         return x
 
 
