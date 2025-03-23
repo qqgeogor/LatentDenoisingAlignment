@@ -25,7 +25,7 @@ import torch.nn.functional as F
 import contextlib
 import utils_ibot as utils
 from vit import MaskedAutoencoderViT
-
+from copy import deepcopy
 # Set matplotlib backend to avoid GUI dependencies
 os.environ['MPLBACKEND'] = 'Agg'
 import matplotlib
@@ -672,18 +672,7 @@ def train_mae():
     ).to(device)
 
     # Initialize teacher model (for EMA)
-    teacher_model = MaskedAutoencoderViT(
-        img_size=args.img_size,
-        patch_size=args.patch_size,
-        embed_dim=args.embed_dim,
-        depth=args.depth,
-        num_heads=args.num_heads,
-        decoder_embed_dim=args.decoder_embed_dim,
-        decoder_depth=args.decoder_depth,
-        decoder_num_heads=args.decoder_num_heads,
-        mlp_ratio=args.mlp_ratio,
-        use_checkpoint=args.use_checkpoint
-    ).to(device)
+    teacher_model = deepcopy(model)
 
     # Create optimizer with explicit betas
     optimizer = create_optimizer_v2(
@@ -752,7 +741,7 @@ def train_mae():
                 
                 with torch.no_grad():
                     h_target = teacher_model.forward_feature(imgs)
-                    print(h_target.shape)
+                    # print(h_target.shape)
                     target = teacher_model.forward_predictor(h_target)
                 target = F.normalize(target, dim=-1)
                 target = target.detach()
