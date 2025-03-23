@@ -752,7 +752,8 @@ def train_mae():
                 with torch.no_grad():
                     target = teacher_model.forward_feature(imgs)
                     target = teacher_model.proj_head(target)
-                    target = F.normalize(target, dim=-1)
+                target = F.normalize(target, dim=-1)
+                target = target.detach()
 
                 view = model.forward_feature(noised_images)
                 view = model.proj_head(view)
@@ -761,7 +762,7 @@ def train_mae():
                 view = view.reshape(-1, view.size(-1))
                 target = target.reshape(-1, target.size(-1))
               
-                loss, loss_tcr, loss_cos = weighted_simsiam_loss(view, target, model.patch_weights)
+                loss, loss_tcr, loss_cos = weighted_simsiam_loss(view, target, pca_noiser.patch_weights)
                 
             # Backward pass with gradient scaling if using AMP
             if args.use_amp:
