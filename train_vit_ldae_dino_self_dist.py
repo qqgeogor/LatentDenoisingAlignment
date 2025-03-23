@@ -761,8 +761,9 @@ def train_mae():
 
                 view = view.reshape(-1, view.size(-1))
                 target = target.reshape(-1, target.size(-1))
-              
-                loss, loss_tcr, loss_cos = weighted_simsiam_loss(view, target, pca_noiser.patch_weights)
+                patch_weights = pca_noiser.patch_weights.reshape(-1,1)
+                
+                loss, loss_tcr, loss_cos = weighted_simsiam_loss(view, target, patch_weights)
                 
             # Backward pass with gradient scaling if using AMP
             if args.use_amp:
