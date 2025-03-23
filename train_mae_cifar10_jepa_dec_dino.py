@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from functools import partial
 import numpy as np
 from timm.models.vision_transformer import Block,PatchEmbed
-from vit_transformer import LatentPatchPCANoise,SVDPatchPCANoise as PatchPCANoise
+from utils_ibot import SVDPatchPCANoise as PatchPCANoise
 
 
 from timm.models.layers import trunc_normal_
@@ -76,11 +76,6 @@ class MaskedAutoencoderViT(nn.Module):
         self.decoder_num_heads = decoder_num_heads
         
 
-        base_noise_scale = 0.5
-        self.noisers = nn.ModuleList([
-            LatentPatchPCANoise(patch_size=patch_size, noise_scale=base_noise_scale*2**(-i))
-            for i in range(depth)
-        ])
         
         self.proj_head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim*4),
@@ -232,7 +227,7 @@ class MaskedAutoencoderViT(nn.Module):
         x = torch.cat((cls_tokens, x), dim=1)
 
         idx = 0
-        for blk,noiser in zip(self.blocks,self.noisers):
+        for blk in self.blocks:
             # x = noiser(x)
             if self.use_checkpoint and self.training:
                 x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
@@ -435,7 +430,7 @@ def visualize_reconstruction(model, images, mask_ratio=0.75, save_path='reconstr
     # Create save directory if it doesn't exist
     os.makedirs(save_path, exist_ok=True)
     if pca_noiser is None:
-        pca_noiser = PatchPCANoise(patch_size=model.patch_size, noise_scale=1.,kernel='linear',gamma=1.0)
+        pca_noiser = PatchPCANoise(patch_size=model.patch_size, noise_scale=3**0.5,kernel='linear',gamma=1.0)
     noised_images,x_components = pca_noiser(images,return_patches=True)
     model.eval()
     with torch.no_grad():
