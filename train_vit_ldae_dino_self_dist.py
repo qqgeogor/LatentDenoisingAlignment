@@ -745,7 +745,7 @@ def train_mae():
             momentum = momentum_scheduler[it]
             current_weight_decay = weight_decay_scheduler[it]
             optimizer.param_groups[0]['weight_decay'] = current_weight_decay    
-            
+
             # Forward pass with mixed precision
             with autocast() if args.use_amp else contextlib.nullcontext():
                 
@@ -758,6 +758,8 @@ def train_mae():
                 view = model.proj_head(view)
                 view = F.normalize(view, dim=-1)
 
+                view = view.reshape(-1, view.size(-1))
+                target = target.reshape(-1, target.size(-1))
               
                 loss, loss_tcr, loss_cos = weighted_simsiam_loss(view, target, model.patch_weights)
                 
