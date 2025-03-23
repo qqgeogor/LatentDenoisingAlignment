@@ -740,9 +740,12 @@ def train_mae():
             with autocast() if args.use_amp else contextlib.nullcontext():
                 
                 with torch.no_grad():
-                    h_target = teacher_model.forward_feature(imgs)
+                    # target = teacher_model.forward_feature(imgs)
+                    target = teacher_model.patch_embed(imgs)
                     # print(h_target.shape)
-                    target = teacher_model.forward_predictor(h_target)
+                    # target = teacher_model.forward_predictor(h_target)
+                # h_target = teacher_model.forward_feature(imgs)
+                # target = teacher_model.forward_predictor(h_target)
 
                 target = F.normalize(target, dim=-1)
                 target = target.detach()

@@ -469,7 +469,7 @@ def get_args_parser():
     # Logging and saving
     parser.add_argument(
         '--output_dir', 
-        default='/mnt/d/repo/output/mae_cifar10_hldae_dino',
+        default='/mnt/d/repo/output/mae_cifar10_hldae_dino_whole',
         help='Path where to save checkpoints and logs'
     )
     parser.add_argument(
@@ -766,7 +766,7 @@ def train_mae():
                     centroid += view_features[:, 1:]
                 centroid = centroid / len(split_features)
                 # centroid = centroid.transpose(0, 1)
-                centroid = centroid.reshape(-1,centroid.size(-1))
+                # centroid = centroid.reshape(-1,centroid.size(-1))
                 
                 # Use last view features for cosine similarity loss calculation
                 x = split_features[-1]
