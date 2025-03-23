@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from functools import partial
 import numpy as np
 from timm.models.vision_transformer import Block,PatchEmbed
-from vit_transformer import LatentPatchPCANoise,SVDPatchPCANoise as PatchPCANoise
+from vit import SVDPatchPCANoise as PatchPCANoise
 
 
 from timm.models.layers import trunc_normal_
@@ -74,12 +74,7 @@ class MaskedAutoencoderViT(nn.Module):
         
 
         self.precond = EDMPrecondMae(self)
-        base_noise_scale = 0.5
-        self.noisers = nn.ModuleList([
-            LatentPatchPCANoise(patch_size=patch_size, noise_scale=base_noise_scale*2**(-i))
-            for i in range(depth)
-        ])
-        
+
         self.proj_head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim*4),
             nn.GELU(),
@@ -230,8 +225,7 @@ class MaskedAutoencoderViT(nn.Module):
         x = torch.cat((cls_tokens, x), dim=1)
 
         idx = 0
-        for blk,noiser in zip(self.blocks,self.noisers):
-            # x = noiser(x)
+        for blk in self.blocks:
             if self.use_checkpoint and self.training:
                 x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
             else:
