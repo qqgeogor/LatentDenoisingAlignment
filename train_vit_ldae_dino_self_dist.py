@@ -100,18 +100,18 @@ class SVDPatchPCANoise(nn.Module):
         noise_coeff = torch.randn(all_patches.size(0), self.valid_components).to(all_patches.device)
         scaled_noise = noise_coeff * (self.ema_eig_vals.sqrt()).unsqueeze(0)
         pca_noise = scaled_noise @ self.ema_eig_vecs.T
-
+        
         # Calculate noise energy per patch
         noise_energy = torch.sum(pca_noise**2, dim=1)  # L2 norm squared per patch
         
         # Normalize to create weights - can use different normalization strategies
-        patch_weights = noise_energy / noise_energy.max()  # Simple min-max normalization
+        patch_weights = noise_energy #/ noise_energy.max()  # Simple min-max normalization
         # Alternative: softmax-based weighting
         # patch_weights = F.softmax(noise_energy / temperature, dim=0)
         
         # Reshape weights to match the original patch dimensions
         patch_weights = patch_weights.reshape(B, num_patches_h * num_patches_w)
-
+        
         # Store the weights for later use in the model
         self.patch_weights = patch_weights
 
