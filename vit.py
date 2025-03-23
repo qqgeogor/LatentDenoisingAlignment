@@ -202,6 +202,25 @@ class MaskedAutoencoderViT(nn.Module):
         return x, mask, ids_restore
 
 
+    def forward_predictor(self, x):
+        x = self.decoder_embed(x)
+
+        x = x + self.decoder_pos_embed
+
+        for blk in self.decoder_blocks:
+            if self.use_checkpoint:
+                x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
+            else:
+                x = blk(x)
+        x = self.decoder_norm(x)
+        x = self.decoder_pred(x)
+        x = x[:, 1:, :]  # Remove CLS token
+        
+        x = self.proj_head(x)
+        
+        return x
+
+
     def forward_decoder(self, x,noised_image, mask,ids_restore):
         x = self.decoder_embed(x)
 
