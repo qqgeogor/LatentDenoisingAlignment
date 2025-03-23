@@ -100,7 +100,7 @@ class SVDPatchPCANoise(nn.Module):
         noise_coeff = torch.randn(all_patches.size(0), self.valid_components).to(all_patches.device)
         scaled_noise = noise_coeff * (self.ema_eig_vals.sqrt()).unsqueeze(0)
         pca_noise = scaled_noise @ self.ema_eig_vecs.T
-        
+
         # Calculate noise energy per patch
         noise_energy = torch.sum(pca_noise**2, dim=1)  # L2 norm squared per patch
         
@@ -793,6 +793,7 @@ def train_mae():
                     f'Loss_tcr: {loss_tcr:.3f}, '
                     f'Loss_cos: {loss_cos:.3f}, '
                     f'Loss_sim: {loss_sim:.3f}, '
+                    f'Patch_weights: {patch_weights.mean(),patch_weights.max(),patch_weights.min()}, '
                     f'Momentum: {momentum:.5f}, '
                     f'Weight_decay: {current_weight_decay:.6f}, '
                     f'LR: {current_lr:.6f}'
