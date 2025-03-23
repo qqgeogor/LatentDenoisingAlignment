@@ -763,13 +763,13 @@ def train_mae():
 
                 ## cbow
                 with torch.no_grad():
-                    target = teacher_model.forward_feature(noised_images)
+                    target = teacher_model.forward_feature(imgs)
                     target = teacher_model.forward_predictor(target)
                     target = target.detach()
 
                 target = target.detach()
 
-                view = model.patch_embed(imgs)
+                view = model.patch_embed(noised_images)
 
 
                 view = view.reshape(-1, view.size(-1))
