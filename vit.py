@@ -208,7 +208,7 @@ class MaskedAutoencoderViT(nn.Module):
         x = x + self.decoder_pos_embed
 
         for blk in self.decoder_blocks:
-            if self.use_checkpoint:
+            if self.use_checkpoint and self.training:
                 x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
             else:
                 x = blk(x)
