@@ -1,1 +1,1 @@
-python train_vit_ldae_dino.py --use_amp --output_dir ../../autodl-tmp/output/ --resume ../../autodl-tmp/output/*_40.pth 
+python train_vit_ldae_dino.py --use_amp --output_dir ../../autodl-tmp/output/ --save_freq 100
