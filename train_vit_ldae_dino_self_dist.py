@@ -100,7 +100,7 @@ class SVDPatchPCANoise(nn.Module):
         noise_coeff = torch.randn(all_patches.size(0), self.valid_components).to(all_patches.device)
         scaled_noise = noise_coeff * (self.ema_eig_vals.sqrt()).unsqueeze(0)
         pca_noise = scaled_noise @ self.ema_eig_vecs.T
-
+        
         # Calculate noise energy per patch
         noise_energy = torch.sum(pca_noise**2, dim=1)  # L2 norm squared per patch
         
