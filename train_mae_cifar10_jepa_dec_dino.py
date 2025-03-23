@@ -680,7 +680,7 @@ def train_mae():
         
         # Load Tiny ImageNet dataset using ImageFolder
         trainset = torchvision.datasets.ImageFolder(
-            root=os.path.join(args.data_path, f'{args.dataset}/train'),
+            root=os.path.join(args.data_path),
             transform=transform
         )
 
