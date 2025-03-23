@@ -20,7 +20,7 @@ from pathlib import Path
 import math
 from timm.scheduler.cosine_lr import CosineLRScheduler
 from timm.optim import create_optimizer_v2
-from karas_sampler import KarrasSampler,get_sigmas_karras,NonEDMPrecondMae as EDMPrecondMae
+from karas_sampler import KarrasSampler,get_sigmas_karras
 from einops import rearrange
 import seaborn as sns
 import os
@@ -73,7 +73,6 @@ class MaskedAutoencoderViT(nn.Module):
         self.decoder_num_heads = decoder_num_heads
         
 
-        self.precond = EDMPrecondMae(self)
 
         self.proj_head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim*4),
