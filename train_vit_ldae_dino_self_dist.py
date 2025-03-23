@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from functools import partial
 import numpy as np
 from timm.models.vision_transformer import Block, PatchEmbed
-from utils_ibot import SVDPatchPCANoise as PatchPCANoise
+# from utils_ibot import SVDPatchPCANoise as PatchPCANoise
 from timm.models.layers import trunc_normal_
 import os
 import matplotlib.pyplot as plt
@@ -211,7 +211,7 @@ def visualize_reconstruction(model, images, mask_ratio=0.75, save_path='reconstr
     # Create save directory if it doesn't exist
     os.makedirs(save_path, exist_ok=True)
     if pca_noiser is None:
-        pca_noiser = PatchPCANoise(patch_size=model.patch_size, noise_scale=(3**0.5), kernel='linear', gamma=1.0)
+        pca_noiser = SVDPatchPCANoise(patch_size=model.patch_size, noise_scale=(3**0.5), kernel='linear', gamma=1.0)
     
     noised_images, x_components = pca_noiser(images, return_patches=True)
     
@@ -628,7 +628,7 @@ def train_mae():
     )
 
     # Initialize PCA noiser
-    pca_noiser = PatchPCANoise(
+    pca_noiser = SVDPatchPCANoise(
         patch_size=args.patch_size, 
         noise_scale=args.noise_scale,
         kernel='linear',
