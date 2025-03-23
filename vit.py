@@ -61,6 +61,12 @@ class MaskedAutoencoderViT(nn.Module):
             nn.GELU(),
             nn.Linear(embed_dim*4, embed_dim),
         )
+
+        self.decoder_proj_head = nn.Sequential(
+            nn.Linear(decoder_embed_dim, decoder_embed_dim*4),
+            nn.GELU(),
+            nn.Linear(decoder_embed_dim*4, decoder_embed_dim),
+        )
         # --------------------------------------------------------------------------
         # MAE encoder specifics
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
@@ -176,7 +182,7 @@ class MaskedAutoencoderViT(nn.Module):
         x = torch.cat((cls_tokens, x), dim=1)
 
         for blk in self.blocks:
-            if self.use_checkpoint:
+            if self.use_checkpoint and self.training:
                 x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
             else:
                 x = blk(x)
@@ -193,7 +199,7 @@ class MaskedAutoencoderViT(nn.Module):
         x = torch.cat((cls_tokens, x), dim=1)
 
         for blk in self.blocks:
-            if self.use_checkpoint:
+            if self.use_checkpoint and self.training:
                 x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
             else:
                 x = blk(x)
@@ -214,7 +220,7 @@ class MaskedAutoencoderViT(nn.Module):
                 x = blk(x)
         x = self.decoder_norm(x)
         x = self.decoder_pred(x)
-        x = self.proj_head(x)
+        x = self.decoder_proj_head(x)
         x = x[:, 1:, :]  # Remove CLS token
         
 
@@ -238,7 +244,7 @@ class MaskedAutoencoderViT(nn.Module):
         x = x + self.decoder_pos_embed
 
         for blk in self.decoder_blocks:
-            if self.use_checkpoint:
+            if self.use_checkpoint and self.training:
                 x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
             else:
                 x = blk(x)
