@@ -740,19 +740,20 @@ def train_mae():
             with autocast() if args.use_amp else contextlib.nullcontext():
                 
                 with torch.no_grad():
-                    # target = teacher_model.forward_feature(imgs)
+                    # target = teacher_model.forward_feature(imgs)[:,1:]
                     target = teacher_model.patch_embed(imgs)
+                    # target = teacher_model.patchify(imgs)
                     # print(h_target.shape)
                     # target = teacher_model.forward_predictor(h_target)
                 # h_target = teacher_model.forward_feature(imgs)
                 # target = teacher_model.forward_predictor(h_target)
 
-                target = F.normalize(target, dim=-1)
+                # target = F.normalize(target, dim=-1)
                 target = target.detach()
 
                 h_view = model.forward_feature(noised_images)
                 view = model.forward_predictor(h_view)
-                view = F.normalize(view, dim=-1)
+                # view = F.normalize(view, dim=-1)
 
                 view = view.reshape(-1, view.size(-1))
                 target = target.reshape(-1, target.size(-1))
@@ -760,6 +761,10 @@ def train_mae():
                 dummy_patch_weights = torch.ones_like(patch_weights)    
                 loss, loss_tcr, loss_cos, loss_sim = weighted_simsiam_loss(view, target, dummy_patch_weights)
                 
+                loss = (view - target) ** 2
+                loss = loss.mean(dim=-1)
+                loss = loss.mean()
+
             # Backward pass with gradient scaling if using AMP
             if args.use_amp:
                 scaler.scale(loss).backward()
