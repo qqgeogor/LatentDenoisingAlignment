@@ -159,9 +159,10 @@ def weighted_simsiam_loss(z_pred, z_target, weights):
     loss_tcr = -R_nonorm(z_pred) * 1e-2
     # Weight the similarity based on patch importance
     cos_sim = torch.cosine_similarity(z_pred, z_target, dim=-1)
-    loss_sim = 1 - (cos_sim * weights).mean()
+    loss_cos = 1 - (cos_sim).mean()
+    loss_sim = (cos_sim * weights).mean()
     out = loss_tcr + loss_sim
-    return out, loss_tcr, loss_sim
+    return out, loss_tcr, loss_cos,loss_sim
 
 
 
@@ -762,8 +763,8 @@ def train_mae():
                 view = view.reshape(-1, view.size(-1))
                 target = target.reshape(-1, target.size(-1))
                 patch_weights = pca_noiser.patch_weights.reshape(-1,1)
-                
-                loss, loss_tcr, loss_cos = weighted_simsiam_loss(view, target, patch_weights)
+
+                loss, loss_tcr, loss_cos, loss_sim = weighted_simsiam_loss(view, target, patch_weights)
                 
             # Backward pass with gradient scaling if using AMP
             if args.use_amp:
@@ -791,6 +792,7 @@ def train_mae():
                     f'Loss: {avg_loss:.3f}, '
                     f'Loss_tcr: {loss_tcr:.3f}, '
                     f'Loss_cos: {loss_cos:.3f}, '
+                    f'Loss_sim: {loss_sim:.3f}, '
                     f'Momentum: {momentum:.5f}, '
                     f'Weight_decay: {current_weight_decay:.6f}, '
                     f'LR: {current_lr:.6f}'
