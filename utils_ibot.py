@@ -118,7 +118,7 @@ class SVDPatchPCANoise(nn.Module):
         # patch_weights = F.softmax(noise_energy / temperature, dim=0)
         
         # Reshape weights to match the original patch dimensions
-        patch_weights = patch_weights.reshape(B, num_patches_h * num_patches_w)
+        patch_weights = patch_weights.reshape(B, -1)
         
         # Store the weights for later use in the model
         self.patch_weights = patch_weights
