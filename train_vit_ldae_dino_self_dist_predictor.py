@@ -729,6 +729,7 @@ def train_mae():
         for i, (imgs, _) in enumerate(trainloader):
             imgs = imgs.to(device)
             noised_images = pca_noiser(imgs)
+            
             optimizer.zero_grad()
             
             it = i + epoch * len(trainloader)

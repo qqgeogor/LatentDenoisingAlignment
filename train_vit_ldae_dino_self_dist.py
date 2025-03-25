@@ -724,6 +724,7 @@ def train_mae():
         
         for i, (imgs, _) in enumerate(trainloader):
             imgs = imgs.to(device)
+            target_noised_images = pca_noiser(imgs)
             noised_images = pca_noiser(imgs)
             optimizer.zero_grad()
             
@@ -736,7 +737,8 @@ def train_mae():
             with autocast() if args.use_amp else contextlib.nullcontext():
                 
                 with torch.no_grad():
-                    target = teacher_model.forward_feature(imgs)
+                    target = teacher_model.forward_feature(target_noised_images)
+                    # target = teacher_model.forward_feature(imgs)
                     target = teacher_model.proj_head(target)
                 target = F.normalize(target, dim=-1)
                 target = target.detach()
