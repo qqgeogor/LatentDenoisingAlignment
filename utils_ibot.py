@@ -263,9 +263,9 @@ class MaxSVDPatchPCANoise(nn.Module):
             self.ema_eig_vecs = eig_vecs
         
         noise_coeff = torch.randn(all_patches.size(0), self.valid_components).to(all_patches.device)
-        scaled_noise = noise_coeff * (self.ema_eig_vals.sqrt().max(-1,keepdim=True)[0]).unsqueeze(0)
+        scaled_noise = noise_coeff * self.noise_scale * self.ema_eig_vals.sqrt().unsqueeze(0)
         pca_noise = scaled_noise @ self.ema_eig_vecs.T
-
+        
         # Reshape noise and add to original patches
         pca_noise = pca_noise.reshape_as(x_patches)
         noisy_patches = x_patches + pca_noise
