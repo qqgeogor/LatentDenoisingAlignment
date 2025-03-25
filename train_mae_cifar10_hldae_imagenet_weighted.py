@@ -726,8 +726,8 @@ def train_mae():
                     _, pred, _ = model(noised_imgs, mask_ratio=args.mask_ratio)
                 
                     loss = (pred - model.patchify(imgs))**2
-                    print('loss',loss.shape )
-                    print('patch_weights',patch_weights.shape)
+                    # print('loss',loss.shape )
+                    # print('patch_weights',patch_weights.shape)
                     loss = loss * patch_weights
                     loss = loss.mean(-1)
                     loss = loss.mean()
