@@ -6,3 +6,9 @@ python finetune_cifar_classifier_hldae_dino.py --pretrained_path ../../autodl-tm
 
 
 python finetune_cifar_classifier_hldae_dino.py --pretrained_path ../../autodl-tmp/output_tiny/*_10.pth  --img_size 128 --patch_size 16
+
+
+
+
+python finetune_cifar_classifier_vit_hldae_tiny.py --pretrained_path /mnt/d/repo/output/cifar_self_dist/checkpoint_epoch_1.pth  --img_size 128 --patch_size 16 --decoder_embed_dim 192
+

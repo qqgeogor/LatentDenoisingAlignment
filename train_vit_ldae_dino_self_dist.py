@@ -25,7 +25,7 @@ import torch.nn.functional as F
 import contextlib
 import utils_ibot as utils
 from vit import MaskedAutoencoderViT
-
+from utils_ibot import EMAPatchPCANoise as PatchPCANoise
 # Set matplotlib backend to avoid GUI dependencies
 os.environ['MPLBACKEND'] = 'Agg'
 import matplotlib
@@ -165,6 +165,47 @@ def weighted_simsiam_loss(z_pred, z_target, weights):
     return out, loss_tcr, loss_cos.mean(),loss_sim.mean()
 
 
+def visualize_reconstruction(model, images, save_path='reconstructions',pca_noiser=None):
+    """Visualize original, masked, and reconstructed images"""
+    # Create save directory if it doesn't exist
+    os.makedirs(save_path, exist_ok=True)
+
+    noised_images = pca_noiser(images)
+
+    # Normalize images for visualization
+    def denormalize_image(img):
+        img = img.cpu()
+        # Denormalize from CIFAR-10 normalization
+        mean = torch.tensor([0.4914, 0.4822, 0.4465]).view(3, 1, 1)
+        std = torch.tensor([0.2023, 0.1994, 0.2010]).view(3, 1, 1)
+        img = img * std + mean
+        img = torch.clamp(img, 0., 1.)
+        return img
+    
+    # Normalize images for visualization
+    def denormalize_image(img):
+        img = img.cpu()
+        # Denormalize from CIFAR-10 normalization
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+        img = img * std + mean
+        img = torch.clamp(img, 0., 1.)
+        return img
+    
+    # Prepare images for grid
+    images = denormalize_image(images)
+    noised_images = denormalize_image(noised_images)
+
+    # Create image grid
+    n_images = min(8, images.size(0))
+    comparison = torch.cat([
+        images[:n_images],
+        noised_images[:n_images],
+    ])
+    
+    grid = make_grid(comparison, nrow=n_images, padding=2, normalize=False)
+
+    return grid
 
 # Visualization and utility functions
 
@@ -207,70 +248,6 @@ def visualize_attention(model, images, save_path='attention_maps', layer_idx=-1)
         return attn_weights
     
 
-def visualize_reconstruction(model, images, mask_ratio=0.75, save_path='reconstructions', pca_noiser=None):
-    """Visualize original, masked, and reconstructed images."""
-    # Create save directory if it doesn't exist
-    os.makedirs(save_path, exist_ok=True)
-    if pca_noiser is None:
-        pca_noiser = SVDPatchPCANoise(patch_size=model.patch_size, noise_scale=(3**0.5), kernel='linear', gamma=1.0)
-    
-    noised_images, x_components = pca_noiser(images, return_patches=True)
-    
-    model.eval()
-    with torch.no_grad():
-        # Get reconstruction and mask
-        latent, mask, ids_restore = model.forward_encoder(noised_images, mask_ratio)
-        noised_x = torch.randn_like(noised_images) * model.sampler.sigma_max
-        sigmas = get_sigmas_karras(
-            1, model.sampler.sigma_min, model.sampler.sigma_max, 
-            rho=model.sampler.rho, device="cpu"
-        )
-        
-        pred1 = model.denoise(noised_x, latent, mask, ids_restore, sigmas[0])
-        pred3 = pred2 = pred1
-        
-        # Create masked images
-        masked_images = images.clone()
-        
-        # Reshape mask to match image dimensions
-        patch_size = model.patch_size
-        mask = mask.reshape(
-            shape=(mask.shape[0], int(images.shape[2]/patch_size), int(images.shape[3]/patch_size))
-        )
-        mask = mask.repeat_interleave(patch_size, 1).repeat_interleave(patch_size, 2)
-        masked_images = masked_images * (1 - mask.unsqueeze(1).float())
-        
-        # Normalize images for visualization
-        def denormalize_image(img):
-            img = img.cpu()
-            # Denormalize from CIFAR-10 normalization
-            mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-            std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-            img = img * std + mean
-            img = torch.clamp(img, 0., 1.)
-            return img
-        
-        # Prepare images for grid
-        images = denormalize_image(images)
-        noised_images = denormalize_image(noised_images)
-        pred1 = denormalize_image(pred1)
-        pred2 = denormalize_image(pred2)  
-        pred3 = denormalize_image(pred3)
-
-        # Create image grid
-        n_images = min(8, images.size(0))
-        comparison = torch.cat([
-            images[:n_images],
-            noised_images[:n_images],
-            pred1[:n_images],
-            pred2[:n_images],
-            pred3[:n_images],
-        ])
-        
-        grid = make_grid(comparison, nrow=n_images, padding=2, normalize=False)
-    
-    model.train()
-    return grid
 
 
 def save_model(model, optimizer, scheduler, epoch, loss, save_dir='checkpoints'):
@@ -629,7 +606,7 @@ def train_mae():
     )
 
     # Initialize PCA noiser
-    pca_noiser = SVDPatchPCANoise(
+    pca_noiser = PatchPCANoise(
         patch_size=args.patch_size, 
         noise_scale=args.noise_scale,
         kernel='linear',
@@ -728,6 +705,14 @@ def train_mae():
         else:
             print(f"No checkpoint found at {args.resume}")
 
+    imgs = next(iter(trainloader))[0].to(device)
+    grid = visualize_reconstruction(model,imgs,pca_noiser=pca_noiser,save_path=args.output_dir)
+    plt.figure(figsize=(15, 5))
+    plt.imshow(grid.permute(1, 2, 0))
+    plt.axis('off')
+    plt.savefig(os.path.join(args.output_dir, f'reconstruction_epoch_{args.start_epoch}.png'))
+    plt.close()
+
     # Main training loop
     for epoch in range(args.start_epoch, args.epochs):
         model.train()
@@ -762,8 +747,8 @@ def train_mae():
 
                 view = view.reshape(-1, view.size(-1))
                 target = target.reshape(-1, target.size(-1))
-                patch_weights = pca_noiser.patch_weights.reshape(-1,1)
-
+                patch_weights = torch.ones(view.shape[0],1).to(device)
+                
                 loss, loss_tcr, loss_cos, loss_sim = weighted_simsiam_loss(view, target, patch_weights)
                 
             # Backward pass with gradient scaling if using AMP
@@ -783,6 +768,7 @@ def train_mae():
                 for param_q, param_k in zip(model.parameters(), teacher_model.parameters()):
                     param_k.data = momentum * param_k.data + (1 - momentum) * param_q.data
 
+            
             # Log progress
             if i % args.log_freq == args.log_freq - 1:
                 avg_loss = total_loss / num_batches
@@ -801,7 +787,12 @@ def train_mae():
         
         # Calculate epoch loss
         epoch_loss = total_loss / num_batches
-        
+        grid = visualize_reconstruction(model,imgs,pca_noiser=pca_noiser,save_path=args.output_dir)
+        plt.figure(figsize=(15, 5))
+        plt.imshow(grid.permute(1, 2, 0))
+        plt.axis('off')
+        plt.savefig(os.path.join(args.output_dir, f'reconstruction_epoch_{args.start_epoch}.png'))
+        plt.close()
         # Save checkpoint and visualize
         if epoch % args.save_freq == 0 or epoch == args.epochs - 1:
             checkpoint_path = os.path.join(args.output_dir, f'checkpoint_epoch_{epoch}.pth')
