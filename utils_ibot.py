@@ -110,14 +110,14 @@ class SVDPatchPCANoise(nn.Module):
         noisy_patches = x_patches + pca_noise
 
         # Calculate noise energy per patch
-        noise_energy = torch.sum(pca_noise**2, dim=1)  # L2 norm squared per patch
+        noise_energy = torch.sum(pca_noise**2, dim=-1)  # L2 norm squared per patch
         
         # Normalize to create weights - can use different normalization strategies
         patch_weights = noise_energy / noise_energy.max()  # Simple min-max normalization
         print('noise_energy',noise_energy.shape)
         print('pca_noise',pca_noise.shape)
         print('patch_weights',patch_weights.shape)
-        
+
         # Alternative: softmax-based weighting
         # patch_weights = F.softmax(noise_energy / temperature, dim=0)
         
