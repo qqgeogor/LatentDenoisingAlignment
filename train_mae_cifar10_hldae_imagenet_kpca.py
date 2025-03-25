@@ -6,9 +6,7 @@ from torch.utils.data import DataLoader
 from functools import partial
 import numpy as np
 from timm.models.vision_transformer import Block,PatchEmbed
-from utils_ibot import SVDPatchPCANoise as PatchPCANoise
-
-
+from utils_ibot import SVDPatchPCANoise as PatchPCANoise,BatchwiseKernelPatchPCANoise
 from timm.models.layers import trunc_normal_
 import os
 import matplotlib.pyplot as plt
@@ -26,50 +24,16 @@ import seaborn as sns
 import os
 os.environ['MPLBACKEND'] = 'Agg'  # Set this before importing matplotlib
 import matplotlib.pyplot as plt
+
 import matplotlib
 matplotlib.use('Agg')  # Set this before importing pyplot
 import matplotlib.pyplot as plt
+from torch.nn import init
 import torch.nn.functional as F
 
-def R(Z,eps=0.5):
-    Z = F.normalize(Z,dim=-1)
-    b = Z.shape[-2]
-    c = Z.shape[-1]
-    
-    cov = Z.transpose(-2,-1) @ Z
-    I = torch.eye(cov.size(-1)).to(Z.device)
-    for i in range(len(Z.shape)-2):
-        I = I.unsqueeze(0)
-    alpha = c/(b*eps)
-    
-    cov = alpha * cov +  I
-
-    out = 0.5*torch.logdet(cov)
-    return out.mean()
-
-def R_nonorm(Z,eps=0.5):
-
-    b = Z.shape[-2]
-    c = Z.shape[-1]
-    
-    cov = Z.transpose(-2,-1) @ Z
-    I = torch.eye(cov.size(-1)).to(Z.device)
-    for i in range(len(Z.shape)-2):
-        I = I.unsqueeze(0)
-    alpha = c/(b*eps)
-    
-    cov = alpha * cov +  I
-
-    out = 0.5*torch.logdet(cov)
-    return out.mean()
-
-def simsiam_loss(z_pred,z_target):
-    z_pred = F.normalize(z_pred,dim=-1)
-    z_target = F.normalize(z_target,dim=-1)
-    loss_tcr = -R_nonorm(z_pred)*1e-2
-    loss_sim = 1-torch.cosine_similarity(z_pred,z_target,dim=-1).mean()
-    out = loss_tcr + loss_sim
-    return out
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 class MaskedAutoencoderViT(nn.Module):
     def __init__(self, img_size=32, patch_size=4, in_chans=3,
@@ -89,15 +53,9 @@ class MaskedAutoencoderViT(nn.Module):
         self.decoder_depth = decoder_depth
         self.decoder_num_heads = decoder_num_heads
         
-
-
-        self.proj_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim*4),
-            nn.GELU(),
-            nn.Linear(embed_dim*4, embed_dim),
-        )
         # --------------------------------------------------------------------------
         # MAE encoder specifics
+        print(img_size, patch_size, in_chans, embed_dim)
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
         self.patch_embed_decoder = PatchEmbed(img_size, patch_size, in_chans, decoder_embed_dim)
         num_patches = self.patch_embed.num_patches
@@ -110,7 +68,7 @@ class MaskedAutoencoderViT(nn.Module):
             for i in range(depth)])
         self.norm = norm_layer(embed_dim)
         # --------------------------------------------------------------------------
-
+        
         # --------------------------------------------------------------------------
         # MAE decoder specifics
         self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
@@ -118,7 +76,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
 
         self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, decoder_embed_dim), requires_grad=False)
-        
+
         self.decoder_blocks = nn.ModuleList([
             Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, norm_layer=norm_layer)
             for i in range(decoder_depth)])
@@ -126,12 +84,6 @@ class MaskedAutoencoderViT(nn.Module):
         self.decoder_norm = norm_layer(decoder_embed_dim)
         self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size**2 * in_chans, bias=True)
         # --------------------------------------------------------------------------
-
-        self.decoder_projector = nn.Sequential(
-            nn.Linear(decoder_embed_dim, decoder_embed_dim*4),
-            nn.GELU(),
-            nn.Linear(decoder_embed_dim*4, decoder_embed_dim),
-        )
 
         self.norm_pix_loss = norm_pix_loss
         self.patch_size = patch_size
@@ -232,9 +184,7 @@ class MaskedAutoencoderViT(nn.Module):
     def forward_encoder(self, x, mask_ratio):
         x = self.patch_embed(x)
         x = x + self.pos_embed[:, 1:, :]
-
-
-        x, mask, ids_restore = self.random_masking(x, mask_ratio)
+        _, mask, ids_restore = self.random_masking(x, mask_ratio)
 
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
         cls_tokens = cls_token.expand(x.shape[0], -1, -1)
@@ -242,36 +192,30 @@ class MaskedAutoencoderViT(nn.Module):
 
         idx = 0
         for blk in self.blocks:
-            if self.use_checkpoint and self.training:
+            if self.use_checkpoint and self.training:                
                 x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
             else:
                 x = blk(x)
             idx += 1
         x = self.norm(x)
-
+        
         return x, mask, ids_restore
 
     def sample(self, x):
         return self.sampler.sample(x)
 
-    def forward_decoder(self, x,ids_restore):
+    def forward_decoder(self, x,noised_image, mask,ids_restore):
         x = self.decoder_embed(x)
-
-        mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
-        x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)
-        x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))
-
-        x = torch.cat([x[:, :1, :], x_], dim=1)
 
         x = x + self.decoder_pos_embed
 
         for blk in self.decoder_blocks:
-            if self.use_checkpoint and self.training:
+            if self.use_checkpoint:
                 x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
             else:
                 x = blk(x)
         x = self.decoder_norm(x)
-        x = self.decoder_projector(x)
+        x = self.decoder_pred(x)
         x = x[:, 1:, :]  # Remove CLS token
 
         return x
@@ -291,27 +235,30 @@ class MaskedAutoencoderViT(nn.Module):
         return loss
 
     def forward(self, imgs, mask_ratio=0.75):
-        x = self.forward_feature(imgs)
-        x = self.decoder_embed(x)
-
-        x = x + self.decoder_pos_embed
-
-        for blk in self.decoder_blocks:
-            if self.use_checkpoint and self.training:
-                x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
-            else:
-                x = blk(x)
-        x = self.decoder_norm(x)
-        x = self.decoder_projector(x)
-        x = x[:, 1:, :]  # Remove CLS token
-        return x
+        latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
+        
+        noised_image,sigma = self.sampler.add_noise(imgs)
+        
+        snrs = sigma**-2
+        weightings = snrs + 1.0
+        
+        snrs = -2*torch.log(sigma)
+        # snrs = torch.exp(snrs)
+        weightings = snrs + 1.0
+        weightings = torch.ones_like(weightings)
+        
+        # print('snrs',snrs.min(),snrs.max())
+        # print('sigma',sigma.min(),sigma.max())
+        # exit()
+        
+        pred = self.forward_decoder(latent, noised_image, mask, ids_restore)
+        loss = self.forward_loss(imgs, pred, mask,weightings)
+        return loss, pred, mask
     
     
     def denoise(self, noised_image, latent, mask,ids_restore,sigma):
         
-        pred = self.forward_decoder(latent, ids_restore)
-        # print('pred',pred.shape)
-        # exit()
+        pred = self.forward_decoder(latent, noised_image, mask, ids_restore)
         pred = self.unpatchify(pred)
         return pred
     
@@ -438,13 +385,13 @@ def visualize_attention(model, images, save_path='attention_maps', layer_idx=-1)
         return attn_weights
     
 
-def visualize_reconstruction(model, images, mask_ratio=0.75, save_path='reconstructions',pca_noiser=None):
+def visualize_reconstruction(model, images, mask_ratio=0.75, save_path='reconstructions',noise_scale=1.,pca_noiser=None):
     """Visualize original, masked, and reconstructed images"""
     # Create save directory if it doesn't exist
     os.makedirs(save_path, exist_ok=True)
     if pca_noiser is None:
-        pca_noiser = PatchPCANoise(patch_size=model.patch_size, noise_scale=1.,kernel='linear',gamma=1.0)
-    noised_images,x_components = pca_noiser(images,return_patches=True)
+        pca_noiser = BatchwiseKernelPatchPCANoise(patch_size=model.patch_size, noise_scale=noise_scale)
+    noised_images = pca_noiser(images)
     model.eval()
     with torch.no_grad():
         # Get reconstruction and mask
@@ -454,15 +401,11 @@ def visualize_reconstruction(model, images, mask_ratio=0.75, save_path='reconstr
         sigmas = get_sigmas_karras(1, model.sampler.sigma_min, model.sampler.sigma_max, rho=model.sampler.rho, device="cpu")
         
         pred1 = model.denoise(noised_x,latent,mask,ids_restore,sigmas[0])
-        pred3 = pred2 = pred1
+        
         # pred1 = (1-mask.unsqueeze(-1)) * model.patchify(noised_images) + mask.unsqueeze(-1) * model.patchify(pred1)
-        # pred1 = model.patchify(pred1)
-
-        # pred2 = pca_noiser.inverse_transform(pred1)
         # pred1 = model.unpatchify(pred1)
-        # pred2 = model.unpatchify(pred2)
-        # # print('pred2',pred2.shape)
-        # pred3 = model.unpatchify(x_components)
+        
+        pred3 = pred2 = pred1
         # sigmas = get_sigmas_karras(40, model.sampler.sigma_min, model.sampler.sigma_max, rho=model.sampler.rho, device="cpu")
         # pred2,_ = model.sampler.stochastic_iterative_sampler(model,noised_images,sigmas=sigmas,mask_ratio=mask_ratio,latent=latent,mask=mask,ids_restore=ids_restore)
         
@@ -545,11 +488,10 @@ def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if scheduler and checkpoint['scheduler_state_dict']:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        if 'scaler_state_dict' in checkpoint:  # Load scaler state if it exists
-            scaler = GradScaler()
-            scaler.load_state_dict(checkpoint['scaler_state_dict'])
-        else:
-            scaler = GradScaler()
+        # if 'scaler_state_dict' in checkpoint:  # Load scaler state if it exists
+        #     scaler = GradScaler()
+        #     scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        # else:
         start_epoch = checkpoint['epoch'] + 1
         print(f"Resuming from epoch {start_epoch}")
         return start_epoch
@@ -559,22 +501,18 @@ def get_args_parser():
     parser = argparse.ArgumentParser('MAE training for CIFAR-10', add_help=False)
     
     # Add dataset arguments
-    parser.add_argument('--dataset', default='cifar10', type=str, choices=['cifar10', 'tiny-imagenet','imagenet-100'],
+    parser.add_argument('--dataset', default='imagenet-100', type=str, choices=['cifar10', 'tiny-imagenet','imagenet-100'],
                         help='Dataset to use (cifar10 or tiny-imagenet or imagenet-100 )')
-    parser.add_argument('--data_path', default='c:/dataset', type=str,
+    parser.add_argument('--data_path', default='/mnt/d/datasets/imagenet100/train', type=str,
                         help='Path to dataset root directory')
-    parser.add_argument('--noise_scale', default=1, type=float,
+    parser.add_argument('--noise_scale', default=(3**0.5), type=float,
                         help='Noise scale for PCA noise')
-    parser.add_argument('--ema_decay', default=0.996, type=float,
-                        help='EMA decay rate')
-    parser.add_argument('--num_views', default=1, type=int,
-                        help='Number of views for MAE')
     # Model parameters
     parser.add_argument('--model_name', default='mae_base', type=str,
                         help='Name of the model configuration')
-    parser.add_argument('--img_size', default=32, type=int,
+    parser.add_argument('--img_size', default=128, type=int,
                         help='Input image size')
-    parser.add_argument('--patch_size', default=4, type=int,
+    parser.add_argument('--patch_size', default=16, type=int,
                         help='Patch size for image tokenization')
     parser.add_argument('--embed_dim', default=192, type=int,
                         help='Embedding dimension')
@@ -582,7 +520,7 @@ def get_args_parser():
                         help='Depth of transformer')
     parser.add_argument('--num_heads', default=3, type=int,
                         help='Number of attention heads')
-    parser.add_argument('--decoder_embed_dim', default=192, type=int,
+    parser.add_argument('--decoder_embed_dim', default=96, type=int,
                         help='Decoder embedding dimension')
     parser.add_argument('--decoder_depth', default=4, type=int,
                         help='Depth of decoder')
@@ -612,13 +550,13 @@ def get_args_parser():
                         help='Device to use for training')
     parser.add_argument('--seed', default=0, type=int,
                         help='Random seed')
-    parser.add_argument('--use_amp', action='store_true',default=True,
+    parser.add_argument('--use_amp', action='store_true',default=False,
                         help='Use mixed precision training')
-    parser.add_argument('--use_checkpoint', action='store_true',default=True,
+    parser.add_argument('--use_checkpoint', action='store_true',default=False,
                         help='Use gradient checkpointing to save memory')
     
     # Logging and saving
-    parser.add_argument('--output_dir', default='F:/output/mae_cifar10_jepa_sim_dino2',
+    parser.add_argument('--output_dir', default='/mnt/d/repo/output/mae_cifar10_hldae_imagenet100_kpca',
                         help='Path where to save checkpoints and logs')
     parser.add_argument('--save_freq', default=10, type=int,
                         help='Frequency of saving checkpoints')
@@ -645,7 +583,7 @@ def get_args_parser():
     parser.add_argument('--opt-eps', default=1e-8, type=float, metavar='EPSILON',
                         help='Optimizer Epsilon (default: 1e-8)')
     parser.add_argument('--opt-betas', default=[0.5, 0.999], type=float, nargs='+',
-                        help='Optimizer Betas (default: [0.9, 0.999])')
+                        help='Optimizer Betas (default: [0.5, 0.999])')
     parser.add_argument('--clip-grad', type=float, default=None, metavar='NORM',
                         help='Clip gradient norm (default: None, no clipping)')
     parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
@@ -690,32 +628,19 @@ def train_mae():
         
         # Load Tiny ImageNet dataset using ImageFolder
         trainset = torchvision.datasets.ImageFolder(
-            root=os.path.join(args.data_path),
+            root=args.data_path,
             transform=transform
         )
 
     trainloader = DataLoader(trainset, batch_size=args.batch_size,
                            shuffle=True, num_workers=args.num_workers)
 
-    pca_noiser = PatchPCANoise(patch_size=args.patch_size, noise_scale=args.noise_scale,kernel='linear',gamma=1.0)
+    pca_noiser = BatchwiseKernelPatchPCANoise(patch_size=args.patch_size, noise_scale=args.noise_scale)
 
     # Initialize model
     print('use_checkpoint',args.use_checkpoint)
     print('use_amp',args.use_amp)
     model = MaskedAutoencoderViT(
-        img_size=args.img_size,
-        patch_size=args.patch_size,
-        embed_dim=args.embed_dim,
-        depth=args.depth,
-        num_heads=args.num_heads,
-        decoder_embed_dim=args.decoder_embed_dim,
-        decoder_depth=args.decoder_depth,
-        decoder_num_heads=args.decoder_num_heads,
-        mlp_ratio=args.mlp_ratio,
-        use_checkpoint=args.use_checkpoint
-    ).to(device)
-
-    teacher_model = MaskedAutoencoderViT(
         img_size=args.img_size,
         patch_size=args.patch_size,
         embed_dim=args.embed_dim,
@@ -736,7 +661,7 @@ def train_mae():
         weight_decay=args.weight_decay,
         momentum=args.momentum,
         eps=args.opt_eps,
-        betas=tuple(args.opt_betas) if args.opt_betas else (0.9, 0.999),  # Provide default tuple
+        betas=tuple(args.opt_betas) if args.opt_betas else (0.5, 0.999),  # Provide default tuple
     )
     
     # Use timm's CosineLRScheduler
@@ -760,12 +685,9 @@ def train_mae():
             print(f"Loading checkpoint from {args.resume}")
             checkpoint = torch.load(args.resume, map_location=device)
             model.load_state_dict(checkpoint['model_state_dict'])
-            teacher_model.load_state_dict(checkpoint['teacher_model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             if 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict']:
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            if 'scaler_state_dict' in checkpoint and checkpoint['scaler_state_dict']:
-                scaler.load_state_dict(checkpoint['scaler_state_dict'])
             args.start_epoch = checkpoint['epoch'] + 1
             print(f"Resuming from epoch {args.start_epoch}")
         else:
@@ -775,19 +697,18 @@ def train_mae():
     best_loss = float('inf')
 
     imgs = next(iter(trainloader))[0]
-    # grid = visualize_reconstruction(model, imgs[:8].to(device),pca_noiser=pca_noiser)
+    grid = visualize_reconstruction(model, imgs[:8].to(device),noise_scale=args.noise_scale,pca_noiser=pca_noiser)
 
-    # plt.figure(figsize=(15, 5))
-    # plt.imshow(grid.permute(1, 2, 0))
-    # plt.axis('off')
-    # plt.savefig(os.path.join(args.output_dir, f'reconstruction_epoch_{args.start_epoch}.png'))
-    # plt.close()
-    # epoch_path = os.path.join(args.output_dir, f'model_epoch_{args.start_epoch}.pth')
-    # torch.save(model.state_dict(), epoch_path)    
+    plt.figure(figsize=(15, 5))
+    plt.imshow(grid.permute(1, 2, 0))
+    plt.axis('off')
+    plt.savefig(os.path.join(args.output_dir, f'reconstruction_epoch_{args.start_epoch}.png'))
+    plt.close()
+    epoch_path = os.path.join(args.output_dir, f'model_epoch_{args.start_epoch}.pth')
+    torch.save(model.state_dict(), epoch_path)    
     
     for epoch in range(args.start_epoch, args.epochs):
         model.train()
-        teacher_model.eval()
         total_loss = 0
         num_batches = 0
         
@@ -797,61 +718,54 @@ def train_mae():
         for i, (imgs, _) in enumerate(trainloader):
             imgs = imgs.to(device)
             optimizer.zero_grad()
-            
-        
-            with autocast():
-                with torch.no_grad():
-                    # h3,mask3,ids_restore3 = teacher_model.forward_encoder(imgs, mask_ratio=args.mask_ratio)
-                    # z3 = teacher_model.forward_decoder(h3,ids_restore3)
-                    z3 = teacher_model.forward(imgs)
-
-                z3 = F.normalize(z3,dim=-1)
-                z3 = z3.detach()
-
-                loss = 0
-                for _ in range(args.num_views):
-                    h1,mask1,ids_restore1 = model.forward_encoder(imgs, mask_ratio=args.mask_ratio)
-                    z1 = model.forward_decoder(h1,ids_restore1)
+            noised_imgs = pca_noiser(imgs)            
+            if args.use_amp:
+                with autocast():
                     
-                    z1 = F.normalize(z1,dim=-1)
-                    
-                    
+                    _, pred, _ = model(noised_imgs, mask_ratio=args.mask_ratio)
+                
+                    loss = (pred - model.patchify(imgs))**2
+                    loss = loss.mean(-1)
+                    loss = loss.mean()
 
-                    # mask = (mask1 > 0).bool() & (mask2 > 0).bool()
-                    mask = (mask1>0).bool()
 
-                    # centroid = (z1+z2)/2
-                    centroid = (z1+z3)/2
-                    centroid = centroid[mask]
-                    loss_tcr = -R_nonorm(z1).mean()*1e-2
-                    loss_cos = 1 - F.cosine_similarity(z1,z3,dim=-1).mean()
-                    loss += loss_tcr + loss_cos
-                loss = loss/args.num_views
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                
+                _, pred, _ = model(noised_imgs, mask_ratio=args.mask_ratio)
+                
+                loss = (pred - model.patchify(imgs))**2
+                loss = loss.mean(-1)
+                loss = loss.mean()
 
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        
+                loss.backward()
+                optimizer.step()
             
             total_loss += loss.item()
             num_batches += 1
-
-            # Update EMA teacher model
-            with torch.no_grad():
-                for param_q, param_k in zip(model.parameters(), teacher_model.parameters()):
-                    param_k.data = args.ema_decay * param_k.data + (1 - args.ema_decay) * param_q.data
-
+            
             if i % args.log_freq == args.log_freq - 1:
                 avg_loss = total_loss / num_batches
                 # current_lr = scheduler.get_epoch_values(epoch)[0]
                 current_lr = optimizer.param_groups[0]['lr']
                 print(f'Epoch: {epoch + 1}, Batch: {i + 1}, '
                       f'Loss: {avg_loss:.3f}, '
-                      f'Loss_tcr: {loss_tcr:.3f}, '
-                      f'Loss_cos: {loss_cos:.3f}, '
                       f'LR: {current_lr:.6f}')
         
         epoch_loss = total_loss / num_batches
+        
+        # Visualize reconstructions
+        with torch.no_grad():
+            grid = visualize_reconstruction(model, imgs[:8].to(device),noise_scale=args.noise_scale,pca_noiser=pca_noiser)
+                
+        plt.figure(figsize=(15, 5))
+        plt.imshow(grid.permute(1, 2, 0))
+        plt.axis('off')
+        plt.savefig(os.path.join(args.output_dir, f'reconstruction_epoch_{epoch}.png'))
+        plt.close()
+
 
         # Save checkpoint and visualize
         if epoch % args.save_freq == 0 or epoch == args.epochs - 1:
@@ -859,7 +773,6 @@ def train_mae():
             save_dict = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
-                'teacher_model_state_dict': teacher_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'scaler_state_dict': scaler.state_dict() if scaler else None,
@@ -868,6 +781,14 @@ def train_mae():
             }
             torch.save(save_dict, checkpoint_path)
             
+            
+            # # Save best model
+            # if epoch_loss < best_loss:
+            #     best_loss = epoch_loss
+            #     best_path = os.path.join(args.output_dir, 'model_best.pth')
+                
+            #     torch.save(model.state_dict(), best_path)
+                
         
         print(f'Epoch {epoch + 1} completed. Average loss: {epoch_loss:.3f}')
 

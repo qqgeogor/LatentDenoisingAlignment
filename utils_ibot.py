@@ -138,6 +138,296 @@ class SVDPatchPCANoise(nn.Module):
             return noisy_image
 
 
+class KernelPCA(nn.Module):
+    """核PCA模块，支持分批次近似计算与噪声添加"""
+    def __init__(self, n_components=768, kernel='rbf', gamma=1.0, n_anchors=8192, batch_size=64):
+        super().__init__()
+        self.n_components = n_components    # 主成分数量
+        self.kernel = kernel                # 核函数类型（支持'rbf', 'poly'）
+        self.gamma = gamma                  # RBF核参数
+        self.n_anchors = n_anchors          # 锚点数量
+        self.batch_size = batch_size        # 批次大小
+        
+        # 注册缓冲区存储锚点和核矩阵
+        self.register_buffer('anchors', None)         # 锚点数据 (n_anchors, d)
+        self.register_buffer('K_mm', None)           # 锚点核矩阵 (n_anchors, n_anchors)
+        self.register_buffer('alpha', None)          # 投影系数 (n_anchors, n_components)
+        self.register_buffer('mean_anchor', None)    # 锚点均值，用于中心化
+        self.register_buffer('components', None)     # 主成分向量 (d, n_components) - 用于线性核
+
+    @torch.no_grad()
+    def _kernel_func(self, X, Y):
+        """计算核矩阵 (RBF或多项式核)"""
+        if self.kernel == 'rbf':
+            dist = torch.cdist(X, Y, p=2)**2
+            return torch.exp(-self.gamma * dist)
+
+        elif self.kernel == 'poly':
+            return (X @ Y.T)**2
+        elif self.kernel =='linear':
+            return X @ Y.T
+        else:
+            raise ValueError("Unsupported kernel type")
+
+    def _update_anchors(self, batch):
+        """动态更新锚点集合 (FIFO策略)"""
+        # shuffle batch
+        batch = batch[torch.randperm(batch.size(0))]
+        if self.anchors is None:
+            # 初始化锚点为当前批次前n_anchors个样本            
+            self.anchors = batch[:min(self.n_anchors, batch.size(0))].detach()
+            # 计算并存储锚点均值
+            self.mean_anchor = self.anchors.mean(dim=0, keepdim=True)
+        else:
+            # 合并新旧锚点，保留最新的n_anchors个
+            combined = torch.cat([self.anchors, batch], dim=0)
+            self.anchors = combined[-self.n_anchors:].detach()
+            # 更新锚点均值
+            self.mean_anchor = self.anchors.mean(dim=0, keepdim=True)
+
+    def _compute_nystrom_components(self):
+        """计算Nyström近似的主成分"""
+        # 对于线性核，我们可以直接计算PCA
+        if self.kernel == 'linear':
+            # 中心化锚点数据
+            centered_anchors = self.anchors - self.mean_anchor
+            
+            # 计算协方差矩阵
+            cov = centered_anchors.T @ centered_anchors / (self.anchors.size(0) - 1)
+            
+            # 计算特征分解
+            eig_vals, eig_vecs = torch.linalg.eigh(cov)
+            
+            idx = torch.argsort(eig_vals, descending=True)
+            
+            valid_components = torch.sum(eig_vals > 1e-6)
+            eig_vals = eig_vals[idx][:valid_components]
+            eig_vecs = eig_vecs[:, idx][:, :valid_components]
+            
+            # 存储主成分向量和特征值
+            self.components = eig_vecs
+            self.eigenvalues = eig_vals.clamp(min=1e-8)
+            
+            # 同时保持与非线性核一致的接口
+            K_mm = self._kernel_func(self.anchors, self.anchors)
+            self.K_mm = K_mm
+            
+            # 中心化核矩阵
+            ones_m = torch.ones_like(K_mm) / self.n_anchors
+            K_mm_centered = K_mm - ones_m @ K_mm - K_mm @ ones_m + ones_m @ K_mm @ ones_m
+            
+            # 计算特征分解
+            eig_vals_k, eig_vecs_k = torch.linalg.eigh(K_mm_centered)
+            idx = torch.argsort(eig_vals_k, descending=True)
+            eig_vals_k = eig_vals_k[idx][:valid_components]
+            eig_vecs_k = eig_vecs_k[:, idx][:, :valid_components]
+            
+            # 正则化防止数值问题
+            eig_vals_k = torch.clamp(eig_vals_k, min=1e-8)
+            self.alpha = eig_vecs_k / torch.sqrt(eig_vals_k).unsqueeze(0)
+        else:
+            # 对于非线性核，使用原始的Nyström方法
+            K_mm = self._kernel_func(self.anchors, self.anchors)  
+            self.K_mm = K_mm
+            
+            # 中心化核矩阵
+            ones_m = torch.ones_like(K_mm) / self.n_anchors
+            K_mm_centered = K_mm - ones_m @ K_mm - K_mm @ ones_m + ones_m @ K_mm @ ones_m
+            
+            # 计算特征分解
+            eig_vals, eig_vecs = torch.linalg.eigh(K_mm_centered)
+            idx = torch.argsort(eig_vals, descending=True)
+            valid_components = torch.sum(eig_vals > 1e-6)
+            eig_vals = eig_vals[idx][:valid_components]
+            eig_vecs = eig_vecs[:, idx][:, :valid_components]
+            
+            # 正则化防止数值问题
+            eig_vals = torch.clamp(eig_vals, min=1e-8)
+            self.alpha = eig_vecs / torch.sqrt(eig_vals).unsqueeze(0)
+            self.eigenvalues = eig_vals
+
+    @torch.no_grad()
+    def forward(self, x, noise_scale=(3**0.5)):
+        """
+        输入: x - 图像张量 (B, C, H, W)
+        输出: x_recon - 加噪后重建图像 (B, C, H, W)
+        """
+        B, C = x.shape
+        
+        # 1. 动态更新锚点集合
+        x_flatten = x
+        self._update_anchors(x_flatten)
+
+        # 2. 计算Nyström主成分 (每批次更新)
+        self._compute_nystrom_components()
+        
+        # 3. PCA变换与重建
+        if self.kernel == 'linear':
+            # 对于线性核，我们可以直接使用PCA变换和重建
+            # 中心化输入数据
+            x_centered = x_flatten - self.mean_anchor
+            
+            # 计算主成分空间中的表示
+            z = x_centered @ self.components  # (B, n_components)
+            
+            # 可选：在主成分空间中添加噪声
+            if noise_scale > 0 and self.training:
+                noise = torch.randn_like(z) * noise_scale * torch.sqrt(self.eigenvalues)
+                z = z + noise
+            
+            # 重建原始空间
+            x_recon_flatten = z @ self.components.T + self.mean_anchor
+            
+            return x_recon_flatten
+        else:
+            # 对于非线性核，使用Nyström方法
+            m = self.K_mm.shape[0]
+            
+            # 计算输入与锚点的核矩阵
+            K_nm = self._kernel_func(x_flatten, self.anchors)  # (B, m)
+            
+            # 中心化核矩阵
+            ones_n = torch.ones(B, m).to(x.device) / m
+            K_nm_centered = K_nm - ones_n @ self.K_mm - K_nm @ (self.K_mm.sum(dim=1, keepdim=True) / m)
+            
+
+            
+            # 投影到核空间主成分
+            z = K_nm_centered @ self.alpha  # (B, k)
+            
+            # 可选：在主成分空间中添加噪声
+            if noise_scale > 0 and self.training:
+                noise = torch.randn_like(z) * noise_scale * torch.sqrt(self.eigenvalues)
+                z = z + noise
+
+            # 计算重建系数
+            beta = z @ self.alpha.T  # (B, m)
+            
+            # 重建原始空间
+            x_recon_flatten = beta @ self.anchors  # (B, d)
+
+            return x_recon_flatten
+    
+    
+    def rbf_preimage(self,z, anchors, gamma):
+        """Better pre-image estimation for RBF kernel"""
+        # Initialize with weighted average of anchors
+        x_init = (z @ self.alpha.T) @ anchors
+        
+        # Iterative refinement
+        x_solution = x_init.clone()
+        for i in range(10):  # Fixed number of iterations
+            # Compute weights based on kernel distances
+            weights = torch.exp(-gamma * torch.sum((anchors - x_solution.unsqueeze(1))**2, dim=2))
+            weights = weights / weights.sum(dim=1, keepdim=True)
+            
+            # Update solution
+            x_new = weights @ anchors
+            x_solution = x_new
+            
+        return x_solution
+        
+    def extra_repr(self):
+        return f"kernel={self.kernel}, anchors={self.n_anchors}, components={self.n_components}"
+
+
+
+class BatchwiseKernelPatchPCANoise(nn.Module):
+    """Module for applying kernel PCA-based noise to image patches using all components."""
+    
+    def __init__(self, patch_size=4, noise_scale=0.5, kernel='linear', gamma=2):
+        super().__init__()
+        self.patch_size = patch_size
+        self.noise_scale = noise_scale
+        self.kernel = kernel
+        self.gamma = gamma
+        # self.kpca = SKLKernelPCA(fit_inverse_transform=True,kernel=kernel,gamma=self.gamma)
+        self.kpca = KernelPCA(kernel=kernel,gamma=self.gamma)
+        # self.kpca.eval()
+
+    @torch.no_grad()
+    def _kernel_func(self, X, Y):
+        """Compute kernel matrix between X and Y."""
+        if self.kernel == 'rbf':
+            dist = (X.unsqueeze(1) - Y.unsqueeze(2))**2
+            dist = dist.sum(dim=-1)
+            return torch.exp(-self.gamma * dist)
+        elif self.kernel == 'poly':
+            return (X @ Y.transpose(-2, -1))**2
+        else:  # default to linear kernel
+            return X @ Y.transpose(-2, -1)
+
+    def _compute_kernel_pca(self, X,K):
+        """Compute kernel PCA components for input data."""
+        n_samples = X.size(0)
+        
+        # Compute and center kernel matrix
+
+        ones_n = torch.ones(n_samples, n_samples).to(X.device) / n_samples
+        K_centered = K - ones_n @ K - K @ ones_n + ones_n @ K @ ones_n
+        
+        # Compute eigendecomposition
+        eig_vals, eig_vecs = torch.linalg.eigh(K_centered)
+        
+        # Sort eigenvalues and eigenvectors in descending order
+        idx = torch.argsort(eig_vals, descending=True)
+        eig_vals = eig_vals[idx]
+        eig_vecs = eig_vecs[:, idx]
+
+        # Keep only valid components (positive eigenvalues)
+        valid_components = torch.sum(eig_vals > 1e-6)
+        eig_vals = eig_vals[:valid_components]
+        eig_vecs = eig_vecs[:, :valid_components]
+        
+        # Normalize eigenvectors
+        eig_vecs = eig_vecs / torch.sqrt(eig_vals + 1e-8)
+        
+        return eig_vals, eig_vecs, valid_components
+
+
+    def forward(self, x, return_patches=False):
+        if not self.training:
+            return x
+
+        B, C, H, W = x.shape
+        p = self.patch_size
+        assert H % p == 0 and W % p == 0, "Image dimensions must be divisible by patch size"
+
+        # Extract patches
+        x_patches = x.unfold(2, p, p).unfold(3, p, p)  # (B, C, H/p, W/p, p, p)
+        x_patches = x_patches.permute(0, 2, 3, 1, 4, 5)  # (B, H/p, W/p, C, p, p)
+        num_patches_h, num_patches_w = x_patches.size(1), x_patches.size(2)
+        x_patches = x_patches.reshape(B, num_patches_h * num_patches_w, C * p * p)
+
+        noisy_patches = []
+        patch_weights_list = []
+        
+        # x_patches = x_patches.reshape(1,-1,x_patches.shape[-1])
+        # BB,N,_ = x_patches.shape
+        # b_K = self._kernel_func(x_patches, x_patches)
+        
+        x_patches = x_patches.reshape(-1,x_patches.shape[-1])
+        
+        # x_patches = x_patches.reshape(B,-1)
+        # x_patches = x_patches.detach().cpu().numpy()
+        
+        noisy_patches = self.kpca(x_patches)
+        
+        
+        # Reconstruct image from patches
+        noisy_patches = noisy_patches.reshape(B, num_patches_h, num_patches_w, C, p, p)
+        noisy_patches = noisy_patches.permute(0, 3, 1, 4, 2, 5)  # (B, C, H/p, p, W/p, p)
+        noisy_image = noisy_patches.reshape(B, C, H, W)
+
+        if return_patches:
+            components = K @ eig_vecs
+            components = components * torch.sqrt(eig_vals + 1e-8).unsqueeze(0)
+            x_components = components.reshape_as(x_patches[b])
+            return noisy_image, x_components
+        else:
+            return noisy_image
+    
+
 def R_nonorm(Z, eps=0.5, if_fast=True):
     """Compute the log-determinant term."""
     b = Z.size(-2)
@@ -1208,3 +1498,21 @@ def compute_map(ranks, gnd, kappas=[]):
     pr = pr / (nq - nempty)
 
     return map, aps, pr, prs
+
+def rbf_preimage(z, anchors, gamma):
+    """Better pre-image estimation for RBF kernel"""
+    # Initialize with weighted average of anchors
+    x_init = (z @ self.alpha.T) @ anchors
+    
+    # Iterative refinement
+    x_solution = x_init.clone()
+    for i in range(10):  # Fixed number of iterations
+        # Compute weights based on kernel distances
+        weights = torch.exp(-gamma * torch.sum((anchors - x_solution.unsqueeze(1))**2, dim=2))
+        weights = weights / weights.sum(dim=1, keepdim=True)
+        
+        # Update solution
+        x_new = weights @ anchors
+        x_solution = x_new
+        
+    return x_solution
