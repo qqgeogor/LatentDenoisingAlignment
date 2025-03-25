@@ -48,6 +48,73 @@ def fast_logdet_cholesky(x):
     return 2 * torch.sum(torch.log(torch.diag(L)))
 
 
+class EMAPatchPCANoise(nn.Module):
+    def __init__(self, patch_size=4, noise_scale=0.5,kernel='linear',gamma=1.0,alpha=0.995):
+        super().__init__()
+        self.patch_size = patch_size
+        self.noise_scale = noise_scale
+        self.ema_cov = None
+        self.alpha = alpha
+
+    def forward(self, x,return_patches=False):
+        if not self.training:
+            return x
+
+        B, C, H, W = x.shape
+        p = self.patch_size
+        assert H % p == 0 and W % p == 0, "Image dimensions must be divisible by patch size"
+
+        # Extract patches (B, C, H, W) -> (B, num_patches, C*p*p)
+        x_patches = x.unfold(2, p, p).unfold(3, p, p)  # (B, C, H/p, W/p, p, p)
+        x_patches = x_patches.permute(0, 2, 3, 1, 4, 5)  # (B, H/p, W/p, C, p, p)
+        num_patches_h, num_patches_w = x_patches.size(1), x_patches.size(2)
+        x_patches = x_patches.reshape(B, num_patches_h * num_patches_w, C * p * p)
+
+        # Flatten all patches across batch and spatial dimensions
+        all_patches = x_patches.reshape(-1, C*p*p)  # (B*num_patches_total, C*p*p)
+
+        # Compute PCA components
+        with torch.no_grad():
+            mean = all_patches.mean(dim=0)
+            centered = all_patches - mean
+            cov = (centered.T @ centered) / (centered.size(0) - 1 + 1e-6)
+            if self.ema_cov is None:
+                self.ema_cov = cov
+            else:
+                self.ema_cov = self.ema_cov*self.alpha + cov*(1-self.alpha)
+            eig_vals, eig_vecs = torch.linalg.eigh(self.ema_cov+1e-6*torch.eye(self.ema_cov.size(0)).to(self.ema_cov.device))
+            # Reverse to get descending order
+            eig_vals = eig_vals.flip(0)
+            eig_vecs = eig_vecs.flip(1)
+            valid_components = torch.sum(eig_vals > 1e-6)
+            eig_vals = eig_vals[:valid_components]
+            eig_vecs = eig_vecs[:, :valid_components]
+
+        # Generate PCA-space noise
+        # noise_coeff = torch.randn_like(all_patches)  # (B*num_patches_total, C*p*p)
+        noise_coeff = torch.randn(all_patches.size(0),valid_components).to(all_patches.device)  # (B*num_patches_total, C*p*p)
+        scaled_noise = noise_coeff * (eig_vals.sqrt() * self.noise_scale).unsqueeze(0)
+        # scaled_noise = noise_coeff * (self.noise_scale)
+        pca_noise = scaled_noise @ eig_vecs.T
+
+        # Reshape noise and add to original patches
+        pca_noise = pca_noise.reshape_as(x_patches)
+        noisy_patches = x_patches + pca_noise
+
+        # Reconstruct noisy image from patches
+        noisy_patches = noisy_patches.reshape(B, num_patches_h, num_patches_w, C, p, p)
+        noisy_patches = noisy_patches.permute(0, 3, 1, 4, 2, 5)  # (B, C, H/p, p, W/p, p)
+        noisy_image = noisy_patches.reshape(B, C, H, W)
+
+        if return_patches:
+            components = all_patches @ eig_vecs
+            components = components * torch.sqrt(eig_vals + 1e-8).unsqueeze(0)
+            x_components = components.reshape_as(x_patches)
+            return noisy_image,x_components
+        else:
+            return noisy_image
+
+
 class SVDPatchPCANoise(nn.Module):
     """Module for applying PCA-based noise to image patches."""
     
@@ -117,7 +184,7 @@ class SVDPatchPCANoise(nn.Module):
         # print('noise_energy',noise_energy.shape)
         # print('pca_noise',pca_noise.shape)
         # print('patch_weights',patch_weights.shape)
-        
+
         # Alternative: softmax-based weighting
         # patch_weights = F.softmax(noise_energy / temperature, dim=0)
         
