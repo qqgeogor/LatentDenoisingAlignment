@@ -8,6 +8,8 @@ from pathlib import Path
 from tqdm import tqdm
 from train_mae_cifar10_hldae_imagenet import MaskedAutoencoderViT
 from torch.cuda.amp import autocast, GradScaler
+import mlflow
+import mlflow.pytorch
 
 class CifarClassifier(nn.Module):
     def __init__(self, backbone, num_classes=10,freeze_backbone=False):
@@ -53,102 +55,136 @@ def finetune(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Initialize GradScaler for AMP
-    scaler = GradScaler(enabled=args.use_amp)
+    # Set up MLflow tracking
+    mlflow.set_tracking_uri(args.mlflow_tracking_uri)
+    mlflow.set_experiment(args.mlflow_experiment_name)
+    
+    # Start MLflow run
+    with mlflow.start_run(run_name=args.run_name):
+        # Log parameters
+        mlflow.log_params({
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "learning_rate": args.lr,
+            "model_type": "ViT",
+            "embed_dim": args.embed_dim,
+            "depth": args.depth,
+            "num_heads": args.num_heads,
+            "freeze_backbone": args.freeze_backbone,
+            "img_size": args.img_size,
+            "patch_size": args.patch_size,
+            "use_amp": args.use_amp
+        })
+        
+        # Initialize GradScaler for AMP
+        scaler = GradScaler(enabled=args.use_amp)
 
-    # Data preprocessing for training
-    train_transform = transforms.Compose([
-        transforms.Resize(int(args.img_size*1.14),interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.RandomCrop(args.img_size,padding = 4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-    ])
-    
-    # Data preprocessing for testing
-    test_transform = transforms.Compose([
-        transforms.Resize(args.img_size,interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-    ])
+        # Data preprocessing for training
+        train_transform = transforms.Compose([
+            transforms.Resize(int(args.img_size*1.14),interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.RandomCrop(args.img_size,padding = 4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
+        
+        # Data preprocessing for testing
+        test_transform = transforms.Compose([
+            transforms.Resize(args.img_size,interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
 
-    # Load CIFAR-10
-    trainset = torchvision.datasets.CIFAR10(root=args.data_path, train=True,
-                                          download=True, transform=train_transform)
-    trainloader = DataLoader(trainset, batch_size=args.batch_size,
-                           shuffle=True, num_workers=args.num_workers)
-    
-    testset = torchvision.datasets.CIFAR10(root=args.data_path, train=False,
-                                         download=True, transform=test_transform)
-    testloader = DataLoader(testset, batch_size=args.batch_size,
-                          shuffle=False, num_workers=args.num_workers)
+        # Load CIFAR-10
+        trainset = torchvision.datasets.CIFAR10(root=args.data_path, train=True,
+                                              download=True, transform=train_transform)
+        trainloader = DataLoader(trainset, batch_size=args.batch_size,
+                               shuffle=True, num_workers=args.num_workers)
+        
+        testset = torchvision.datasets.CIFAR10(root=args.data_path, train=False,
+                                             download=True, transform=test_transform)
+        testloader = DataLoader(testset, batch_size=args.batch_size,
+                              shuffle=False, num_workers=args.num_workers)
 
-    # Load pretrained SimSiam model
-    backbone = MaskedAutoencoderViT(img_size=args.img_size, patch_size=args.patch_size, in_chans=3,
-                 embed_dim=args.embed_dim, depth=args.depth, num_heads=args.num_heads,
-                 decoder_embed_dim=args.decoder_embed_dim, decoder_depth=args.decoder_depth, decoder_num_heads=args.decoder_num_heads,
-                 mlp_ratio=args.mlp_ratio, norm_layer=nn.LayerNorm, norm_pix_loss=False, use_checkpoint=False).to(device)
-    if args.pretrained_path:
-        checkpoint = torch.load(args.pretrained_path)
-        backbone.load_state_dict(checkpoint['model_state_dict'],strict=False)
-    
-    # Create classifier
-    model = CifarClassifier(backbone,freeze_backbone=args.freeze_backbone).to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    
-    best_acc = 0
-    
-    # Training loop
-    for epoch in range(args.epochs):
-        model.train()
-        running_loss = 0.0
+        # Load pretrained SimSiam model
+        backbone = MaskedAutoencoderViT(img_size=args.img_size, patch_size=args.patch_size, in_chans=3,
+                     embed_dim=args.embed_dim, depth=args.depth, num_heads=args.num_heads,
+                     decoder_embed_dim=args.decoder_embed_dim, decoder_depth=args.decoder_depth, decoder_num_heads=args.decoder_num_heads,
+                     mlp_ratio=args.mlp_ratio, norm_layer=nn.LayerNorm, norm_pix_loss=False, use_checkpoint=False).to(device)
+        if args.pretrained_path:
+            checkpoint = torch.load(args.pretrained_path)
+            backbone.load_state_dict(checkpoint['model_state_dict'],strict=False)
         
-        for i, (images, labels) in enumerate(tqdm(trainloader)):
-            images, labels = images.to(device), labels.to(device)
-            
-            # Forward pass with autocast、
-            args.use_amp = True
-            with autocast(enabled=args.use_amp):
-                outputs = model(images)
-                loss = criterion(outputs, labels)
-            
-            # Backward pass with scaler
-            optimizer.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            
-            running_loss += loss.item()
-            
-            if i % args.log_freq == 0:
-                print(f'Epoch [{epoch}/{args.epochs}], Step [{i}/{len(trainloader)}], '
-                      f'Loss: {loss.item():.4f}')
+        # Create classifier
+        model = CifarClassifier(backbone,freeze_backbone=args.freeze_backbone).to(device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
         
-        # Evaluate (no need for autocast in eval mode)
-        test_acc = evaluate(model, testloader, device)
-        print(f'Epoch [{epoch}/{args.epochs}], Test Accuracy: {test_acc:.2f}%')
+        best_acc = 0
         
-        # Save best model
-        if test_acc > best_acc:
-            best_acc = test_acc
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scaler_state_dict': scaler.state_dict(),  # Save scaler state
-                'accuracy': test_acc,
-            }, os.path.join(args.output_dir, 'best_classifier.pth'))
-        
-        # Save checkpoint
-        if epoch % args.save_freq == 0:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scaler_state_dict': scaler.state_dict(),  # Save scaler state
-                'accuracy': test_acc,
-            }, os.path.join(args.output_dir, f'classifier_checkpoint_{epoch}.pth'))
+        # Training loop
+        for epoch in range(args.epochs):
+            model.train()
+            running_loss = 0.0
+            
+            for i, (images, labels) in enumerate(tqdm(trainloader)):
+                images, labels = images.to(device), labels.to(device)
+                
+                # Forward pass with autocast
+                with autocast(enabled=args.use_amp):
+                    outputs = model(images)
+                    loss = criterion(outputs, labels)
+                
+                # Backward pass with scaler
+                optimizer.zero_grad()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                
+                running_loss += loss.item()
+                
+                if i % args.log_freq == 0:
+                    print(f'Epoch [{epoch}/{args.epochs}], Step [{i}/{len(trainloader)}], '
+                          f'Loss: {loss.item():.4f}')
+            
+            # Calculate average loss for the epoch
+            avg_loss = running_loss / len(trainloader)
+            
+            # Evaluate (no need for autocast in eval mode)
+            test_acc = evaluate(model, testloader, device)
+            print(f'Epoch [{epoch}/{args.epochs}], Test Accuracy: {test_acc:.2f}%')
+            
+            # Log metrics to MLflow
+            mlflow.log_metrics({
+                "train_loss": avg_loss,
+                "test_accuracy": test_acc
+            }, step=epoch)
+            
+            # Save best model
+            if test_acc > best_acc:
+                best_acc = test_acc
+                checkpoint_path = os.path.join(args.output_dir, 'best_classifier.pth')
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scaler_state_dict': scaler.state_dict(),
+                    'accuracy': test_acc,
+                }, checkpoint_path)
+                
+                # Log best model to MLflow
+                mlflow.pytorch.log_model(model, "best_model")
+                mlflow.log_artifact(checkpoint_path)
+            
+            # Save checkpoint
+            if epoch % args.save_freq == 0:
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scaler_state_dict': scaler.state_dict(),  # Save scaler state
+                    'accuracy': test_acc,
+                }, os.path.join(args.output_dir, f'classifier_checkpoint_{epoch}.pth'))
 
 def get_args_parser():
     import argparse
@@ -181,6 +217,14 @@ def get_args_parser():
     parser.add_argument('--decoder_depth', default=4, type=int)
     parser.add_argument('--decoder_num_heads', default=3, type=int)
     parser.add_argument('--mlp_ratio', default=4., type=float)
+    
+    # Add MLflow arguments
+    parser.add_argument('--mlflow_tracking_uri', default='http://localhost:5000',
+                      help='URI for MLflow tracking server')
+    parser.add_argument('--mlflow_experiment_name', default='cifar10_classifier',
+                      help='MLflow experiment name')
+    parser.add_argument('--run_name', default=None, type=str,
+                      help='Name for the MLflow run')
     
     # Add AMP argument
     parser.add_argument('--use_amp', action='store_true',
