@@ -1,0 +1,1 @@
+python train_mae_cifar10_edm.py --use_amp --output_dir ../../autodl-tmp/output_edm/  --img_size 128 --patch_size 16 --dataset 'tiny-imagenet' --data_path '../../autodl-tmp/tiny-imagenet-200/train' --save_freq 100
