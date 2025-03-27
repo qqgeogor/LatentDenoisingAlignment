@@ -294,11 +294,13 @@ class MaxSVDPatchPCANoise(nn.Module):
         noisy_patches = noisy_patches.permute(0, 3, 1, 4, 2, 5)  # (B, C, H/p, p, W/p, p)
         noisy_image = noisy_patches.reshape(B, C, H, W)
 
+        
+
         if return_patches:
-            components = all_patches @ self.ema_eig_vecs
-            components = components * torch.sqrt(self.ema_eig_vals + 1e-8).unsqueeze(0)
-            x_components = components.reshape_as(x_patches)
-            return noisy_image, x_components
+            pca_noise = pca_noise.reshape(B, num_patches_h, num_patches_w, C, p, p)
+            pca_noise = pca_noise.permute(0, 3, 1, 4, 2, 5)  # (B, C, H/p, p, W/p, p)
+            pca_noise = pca_noise.reshape(B, C, H, W)
+            return noisy_image, pca_noise
         else:
             return noisy_image
 

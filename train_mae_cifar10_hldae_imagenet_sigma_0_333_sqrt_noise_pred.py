@@ -391,7 +391,7 @@ def visualize_reconstruction(model, images, mask_ratio=0.75, save_path='reconstr
     os.makedirs(save_path, exist_ok=True)
     if pca_noiser is None:
         pca_noiser = PatchPCANoise(patch_size=model.patch_size, noise_scale=noise_scale)
-    noised_images = pca_noiser(images)
+    noised_images,pca_noise = pca_noiser(images,return_patches=True)
     model.eval()
     with torch.no_grad():
         # Get reconstruction and mask
@@ -405,7 +405,10 @@ def visualize_reconstruction(model, images, mask_ratio=0.75, save_path='reconstr
         # pred1 = (1-mask.unsqueeze(-1)) * model.patchify(noised_images) + mask.unsqueeze(-1) * model.patchify(pred1)
         # pred1 = model.unpatchify(pred1)
         
-        pred3 = pred2 = pred1
+        # pred3 = pred2 = pred1
+
+        pred2 = pca_noise
+        pred3 = noised_images - pred1
         # sigmas = get_sigmas_karras(40, model.sampler.sigma_min, model.sampler.sigma_max, rho=model.sampler.rho, device="cpu")
         # pred2,_ = model.sampler.stochastic_iterative_sampler(model,noised_images,sigmas=sigmas,mask_ratio=mask_ratio,latent=latent,mask=mask,ids_restore=ids_restore)
         
@@ -718,13 +721,13 @@ def train_mae():
         for i, (imgs, _) in enumerate(trainloader):
             imgs = imgs.to(device)
             optimizer.zero_grad()
-            noised_imgs = pca_noiser(imgs)            
+            noised_imgs,pca_noise = pca_noiser(imgs,return_patches=True)            
             if args.use_amp:
                 with autocast():
                     
                     _, pred, _ = model(noised_imgs, mask_ratio=args.mask_ratio)
                 
-                    loss = (pred - model.patchify(imgs))**2
+                    loss = (pred - model.patchify(pca_noise))**2
                     loss = loss.mean(-1)
                     loss = loss.mean()
 
@@ -736,7 +739,7 @@ def train_mae():
                 
                 _, pred, _ = model(noised_imgs, mask_ratio=args.mask_ratio)
                 
-                loss = (pred - model.patchify(imgs))**2
+                loss = (pred - model.patchify(pca_noise))**2
                 loss = loss.mean(-1)
                 loss = loss.mean()
 
