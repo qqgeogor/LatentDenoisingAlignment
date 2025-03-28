@@ -13,5 +13,13 @@
 #     --save_freq 1
 
 
-
-python train_mae_cifar10_patch_vae.py --use_amp --output_dir ../../autodl-tmp/output_patch_vdae/  --img_size 128 --patch_size 16 --dataset 'tiny-imagenet' --data_path '../../autodl-tmp/tiny-imagenet-200/train' --save_freq 100
+python train_mae_cifar10_patch_vae.py \
+    --use_amp \
+    --output_dir ../../autodl-tmp/output_patch_vdae/  \
+    --img_size 128 \
+    --patch_size 16 \
+    --pretrained_vae ../../autodl-tmp/output_pvae/checkpoint_epoch_99.pth \
+    --dataset 'tiny-imagenet' \
+    --data_path '../../autodl-tmp/tiny-imagenet-200/train' \
+    --save_freq 20
+    
