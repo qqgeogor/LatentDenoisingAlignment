@@ -443,7 +443,7 @@ def visualize_reconstruction(model,vae, images, mask_ratio=0.75, save_path='reco
 
         _, pred5, _ = model(pred3, mask_ratio=0.75)
         pred5 = model.unpatchify(pred5)
-        pred6 = pred3 - pred5
+        pred6 = pred5 - images
         # Create masked images
         masked_images = images.clone()
         
@@ -790,11 +790,11 @@ def train_mae():
                         x_recon_interp = vae.decode(z_interp)
                         x_recon_interp = x_recon_interp.reshape(b,n,c)
                         noised_imgs = model.unpatchify(x_recon_interp)
-                        pca_noise = imgs - noised_imgs
+                        # pca_noise = imgs - noised_imgs
                     
                     _, pred, _ = model(noised_imgs, mask_ratio=args.mask_ratio)
 
-                    loss = (pred - model.patchify(pca_noise))**2
+                    loss = (pred - model.patchify(imgs))**2
                     loss = loss.mean(-1)
                     loss = loss.mean()
 
@@ -817,11 +817,11 @@ def train_mae():
                     x_recon_interp = vae.decode(z_interp)
                     x_recon_interp = x_recon_interp.reshape(b,n,c)
                     noised_imgs = model.unpatchify(x_recon_interp)
-                    pca_noise = imgs - noised_imgs
+                    # pca_noise = imgs - noised_imgs
                 
                 _, pred, _ = model(noised_imgs, mask_ratio=args.mask_ratio)
 
-                loss = (pred - model.patchify(pca_noise))**2
+                loss = (pred - model.patchify(imgs))**2
                 loss = loss.mean(-1)
                 loss = loss.mean()
 
