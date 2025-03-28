@@ -18,13 +18,116 @@ import math
 from timm.scheduler.cosine_lr import CosineLRScheduler
 from timm.optim import create_optimizer_v2
 # from ddpm_sampler import DDPMSampler
+import torch.nn.functional as F
 from einops import rearrange
 import seaborn as sns
+
 import os
 os.environ['MPLBACKEND'] = 'Agg'  # Set this before importing matplotlib
 import matplotlib.pyplot as plt
 
 
+def R_nonorm(Z, eps=0.5):
+    """Compute the log-determinant term."""
+    b = Z.size(-2)
+    c = Z.size(-1)
+    
+    cov = Z.transpose(-2, -1) @ Z
+    I = torch.eye(cov.size(-1)).to(Z.device)
+    for i in range(len(Z.shape)-2):
+        I = I.unsqueeze(0)
+    alpha = c/(b*eps)
+    
+    cov = alpha * cov + I
+
+
+    out = 0.5 * torch.logdet(cov)
+    return out.mean()
+
+
+class PatchVariationalAutoencoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, latent_dim=None):
+        super().__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.latent_dim = latent_dim if latent_dim is not None else hidden_dim // 2
+        
+        # Encoder
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        
+        # Variational part
+        self.fc_mu = nn.Linear(hidden_dim, self.latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim, self.latent_dim)
+        
+        # Decoder
+        self.decoder = nn.Sequential(
+            nn.Linear(self.latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, input_dim),
+        )
+    
+    def encode(self, x):
+        h = self.encoder(x)
+        mu = self.fc_mu(h)
+        logvar = self.fc_logvar(h)
+        return mu, logvar
+    
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+        return z
+    
+    def decode(self, z):
+        return self.decoder(z)
+    
+    def forward(self, x):
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        x_recon = self.decode(z)
+        return x_recon, mu, logvar,z
+    
+    def kl_divergence(self, mu, logvar):
+        # KL divergence between N(mu, sigma) and N(0, 1)
+        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
+    
+    def forward_loss(self, x):
+        """
+        Compute the VAE loss for the given input.
+        
+        Args:
+            x: Input tensor
+            
+        Returns:
+            A tuple containing:
+            - total_loss: The combined reconstruction and KL divergence loss
+            - recon_loss: The reconstruction loss component
+            - kl_loss: The KL divergence loss component
+        """
+        # Forward pass through the VAE
+        x_recon, mu, logvar,z = self.forward(x)
+        
+        tcr_loss = -R_nonorm(F.normalize(z,dim=-1))
+
+        # Compute reconstruction loss (MSE)
+        recon_loss = F.mse_loss(x_recon, x, reduction='none').sum(dim=-1).mean()
+        # recon_loss = (x_recon - x).pow(2).mean(-1).mean()
+        
+        # Compute KL divergence
+        kl_loss = self.kl_divergence(mu, logvar).mean()
+        
+        # Combine losses
+        total_loss = recon_loss + kl_loss + tcr_loss
+        
+        # Return average loss over batch
+        return total_loss, recon_loss, kl_loss,tcr_loss
 
 class DyTanh(nn.Module):
     def __init__(self, num_features, alpha_init_value=0.5):
