@@ -765,10 +765,10 @@ def train_mae():
                     z = F.normalize(z,dim=-1)
                     centroid = z.mean(dim=1)
 
-                    loss_tcr = -R_nonorm(centroid)
-                    loss_kl = vae.kl_divergence(mu, logvar)
+                    loss_tcr = -R_nonorm(centroid).mean()
+                    loss_kl = vae.kl_divergence(mu, logvar).mean()
                     loss = loss_tcr + loss_kl
-                    
+                    # loss = loss_tcr
 
 
 
@@ -787,10 +787,10 @@ def train_mae():
                 z = F.normalize(z,dim=-1)
                 centroid = z.mean(dim=1)
 
-                loss_tcr = -R_nonorm(centroid)
-                loss_kl = vae.kl_divergence(mu, logvar)
+                loss_tcr = -R_nonorm(centroid).mean()
+                loss_kl = vae.kl_divergence(mu, logvar).mean()
                 loss = loss_tcr + loss_kl
-
+                # loss = loss_tcr
 
 
                 loss.backward()

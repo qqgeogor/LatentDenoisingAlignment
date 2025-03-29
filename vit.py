@@ -45,6 +45,101 @@ def R_nonorm(Z, eps=0.5):
     return out.mean()
 
 
+class InvarianceFlow(nn.Module):
+    def __init__(self, input_dim, hidden_dim, n_flows=4):
+        super().__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.n_flows = n_flows
+        
+        # Create a series of invertible coupling layers
+        self.flows = nn.ModuleList([
+            CouplingLayer(input_dim, hidden_dim) 
+            for _ in range(n_flows)
+        ])
+    
+    def forward(self, x):
+        """Forward transformation: x -> z"""
+        z = x
+        log_det_sum = 0
+        
+        for flow in self.flows:
+            z, log_det = flow(z)
+            log_det_sum += log_det
+            
+        return z, log_det_sum
+    
+    def inverse(self, z):
+        """Inverse transformation: z -> x"""
+        x = z
+        for flow in reversed(self.flows):
+            x = flow.inverse(x)
+        return x
+    
+    def forward_loss(self, x):
+        """Compute the flow-based loss using change of variables formula"""
+        # Forward pass to get latent z and log determinant
+        z, log_det = self.forward(x)
+        
+        # Prior likelihood (assuming standard normal prior)
+        prior_ll = -0.5 * (z**2 + math.log(2 * math.pi)).sum(dim=1)
+        
+        # Total loss = negative log likelihood
+        loss = -(prior_ll + log_det)
+        
+        # Add total correlation regularization
+        tcr_loss = -R_nonorm(F.normalize(z, dim=-1))
+        
+        total_loss = loss.mean() + tcr_loss
+        return total_loss, loss.mean(), tcr_loss,z
+
+class CouplingLayer(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super().__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        
+        # Split dimensions in half
+        self.split_dim = input_dim // 2
+        
+        # Scale and translation networks
+        self.net = nn.Sequential(
+            nn.Linear(self.split_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, (input_dim - self.split_dim) * 2)  # Output scale and translation
+        )
+        
+    def forward(self, x):
+        """Forward pass: x -> z"""
+        x1, x2 = torch.split(x, [self.split_dim, self.input_dim - self.split_dim], dim=-1)
+        
+        h = self.net(x1)
+        scale, translate = torch.chunk(h, 2, dim=-1)
+        scale = torch.tanh(scale)  # Bound scaling factor
+        
+        z2 = x2 * torch.exp(scale) + translate
+        z = torch.cat([x1, z2], dim=-1)
+        
+        # Log determinant of the transformation
+        log_det = scale.sum(dim=-1)
+        
+        return z, log_det
+    
+    def inverse(self, z):
+        """Inverse pass: z -> x"""
+        z1, z2 = torch.split(z, [self.split_dim, self.input_dim - self.split_dim], dim=-1)
+        
+        h = self.net(z1)
+        scale, translate = torch.chunk(h, 2, dim=-1)
+        scale = torch.tanh(scale)
+        
+        x2 = (z2 - translate) * torch.exp(-scale)
+        x = torch.cat([z1, x2], dim=-1)
+        
+        return x
+
 class PatchVariationalAutoencoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim=None):
         super().__init__()
