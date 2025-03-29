@@ -405,8 +405,8 @@ def visualize_reconstruction(model,vae, images, mask_ratio=0.75, save_path='reco
         # sigmas = get_sigmas_karras(1, model.sampler.sigma_min, model.sampler.sigma_max, rho=model.sampler.rho, device="cpu")
         
         # pred1 = model.denoise(noised_x,latent,mask,ids_restore,sigmas[0])
-
-         x = model.patchify(images)
+        
+        x = model.patchify(images)
         b,n,c = x.shape
         x = x.reshape(b*n,c)   
 
@@ -439,7 +439,7 @@ def visualize_reconstruction(model,vae, images, mask_ratio=0.75, save_path='reco
         # pred2,_ = model.sampler.stochastic_iterative_sampler(model,noised_images,sigmas=sigmas,mask_ratio=mask_ratio,latent=latent,mask=mask,ids_restore=ids_restore)
         
         # pred3,_ = model.sampler.sample_heun(model,noised_images,sigmas=sigmas,mask_ratio=mask_ratio,latent=latent,mask=mask,ids_restore=ids_restore)
-        
+
         _, pred5, _ = model(pred3, mask_ratio=0.75)
         pred5 = model.unpatchify(pred5)
         pred6 = pred5 - images
