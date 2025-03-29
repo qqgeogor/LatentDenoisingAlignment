@@ -406,19 +406,18 @@ def visualize_reconstruction(model,vae, images, mask_ratio=0.75, save_path='reco
         
         # pred1 = model.denoise(noised_x,latent,mask,ids_restore,sigmas[0])
 
-        x = model.patchify(images)
+         x = model.patchify(images)
         b,n,c = x.shape
         x = x.reshape(b*n,c)   
 
-        mu, logvar = vae.encode(x)
-        z = vae.reparameterize(mu, logvar)
-        x_recon = vae.decode(z)
+        z, log_det = vae.forward(x)
+        x_recon = vae.inverse(z)
         x_recon = x_recon.reshape(b,n,c)
 
         pred1 = model.unpatchify(x_recon)
         
         z_noise = torch.randn_like(z)
-        x_recon_noise = vae.decode(z_noise)
+        x_recon_noise = vae.inverse(z_noise)
         x_recon_noise = x_recon_noise.reshape(b,n,c)
         pred2 = model.unpatchify(x_recon_noise)
         
@@ -431,7 +430,7 @@ def visualize_reconstruction(model,vae, images, mask_ratio=0.75, save_path='reco
         
         z_interp = z + z_noise*(1/3)**0.5
 
-        x_recon_interp = vae.decode(z_interp)
+        x_recon_interp = vae.inverse(z_interp)
         x_recon_interp = x_recon_interp.reshape(b,n,c)
         pred3 = model.unpatchify(x_recon_interp)
 
@@ -440,7 +439,7 @@ def visualize_reconstruction(model,vae, images, mask_ratio=0.75, save_path='reco
         # pred2,_ = model.sampler.stochastic_iterative_sampler(model,noised_images,sigmas=sigmas,mask_ratio=mask_ratio,latent=latent,mask=mask,ids_restore=ids_restore)
         
         # pred3,_ = model.sampler.sample_heun(model,noised_images,sigmas=sigmas,mask_ratio=mask_ratio,latent=latent,mask=mask,ids_restore=ids_restore)
-
+        
         _, pred5, _ = model(pred3, mask_ratio=0.75)
         pred5 = model.unpatchify(pred5)
         pred6 = pred5 - images
@@ -608,8 +607,8 @@ def get_args_parser():
     # Resume training
     parser.add_argument('--resume', default='',
                         help='Resume from checkpoint path')
-    parser.add_argument('--pretrained_vae', default='',
-                        help='Pretrained VAE checkpoint path')
+    parser.add_argument('--pretrained_flow', default='',
+                        help='Pretrained Flow checkpoint path')
 
     parser.add_argument('--start_epoch', default=0, type=int,
                         help='Start epoch when resuming')
@@ -730,7 +729,7 @@ def train_mae():
     # Initialize AMP scaler
     scaler = GradScaler() if args.use_amp else None
 
-    checkpoint = torch.load(args.pretrained_vae, map_location=device)
+    checkpoint = torch.load(args.pretrained_flow, map_location=device)
     vae.load_state_dict(checkpoint['vae_state_dict'])
     # Resume from checkpoint if specified
     if args.resume:
