@@ -22,7 +22,7 @@ class CifarClassifier(nn.Module):
                 param.requires_grad = False
             
         self.classifier = nn.Sequential(
-            nn.Linear(192,num_classes)
+            nn.Linear(self.backbone.embed_dim,num_classes)
         )
         
     def forward(self, x):

@@ -11,5 +11,5 @@
 #     --save_freq 10
 
 
-python train_patch_vae.py --use_amp --output_dir ../../autodl-tmp/output_pvae/  --img_size 128 --patch_size 16 --dataset 'tiny-imagenet' --data_path '../../autodl-tmp/tiny-imagenet-200/train' --save_freq 100 --epochs 100
+python train_patch_vae.py --use_amp --output_dir ../../autodl-tmp/output_pvae/  --img_size 128 --patch_size 16 --dataset 'tiny-imagenet' --data_path '../../autodl-tmp/tiny-imagenet-200/train' --save_freq 20 --epochs 100
 
