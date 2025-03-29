@@ -36,6 +36,23 @@ import warnings
 import argparse
 
 
+def R_nonorm(Z, eps=0.5):
+    """Compute the log-determinant term."""
+    b = Z.size(-2)
+    c = Z.size(-1)
+    
+    cov = Z.transpose(-2, -1) @ Z
+    I = torch.eye(cov.size(-1)).to(Z.device)
+    for i in range(len(Z.shape)-2):
+        I = I.unsqueeze(0)
+    alpha = c/(b*eps)
+    
+    cov = alpha * cov + I
+
+
+    out = 0.5 * torch.logdet(cov)
+    return out.mean()
+
 def fast_logdet_svd(x):
     """Calculate log determinant using SVD."""
     u, s, v = torch.linalg.svd(x, full_matrices=False)

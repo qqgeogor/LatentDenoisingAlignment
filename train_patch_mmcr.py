@@ -35,7 +35,7 @@ import torch.nn.functional as F
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from utils_ibot import R_nonorm
 
         
 class MaskedAutoencoderViT(nn.Module):
@@ -752,14 +752,24 @@ def train_mae():
         
         for i, (imgs, _) in enumerate(trainloader):
             imgs = imgs.to(device)
-            optimizer.zero_grad()
-       
+            optimizer.zero_grad()    
             if args.use_amp:
                 with autocast():
                     x = model.patchify(imgs)
                     b,n,c = x.shape
                     x = x.reshape(b*n,c)                    
-                    loss,recon_loss,kl_loss,tcr_loss = vae.forward_loss(x)
+                    z = vae.encoder(x)
+                    
+                    z = vae.reparameterize(z)
+
+                    z = z.reshape(b,n,-1)
+                    z = F.normalize(z,dim=-1)
+                    centroid = z.mean(dim=1)
+
+                    loss = -R_nonorm(centroid)
+
+                    
+
 
 
                 scaler.scale(loss).backward()
@@ -769,8 +779,17 @@ def train_mae():
                 
                 x = model.patchify(imgs)
                 b,n,c = x.shape
-                x = x.reshape(b*n,c)   
-                loss,recon_loss,kl_loss = vae.forward_loss(x)
+                x = x.reshape(b*n,c)                    
+                z = vae.encoder(x)
+                
+                z = vae.reparameterize(z)
+
+                z = z.reshape(b,n,-1)
+                z = F.normalize(z,dim=-1)
+                centroid = z.mean(dim=1)
+
+                loss = -R_nonorm(centroid)
+
 
 
                 loss.backward()
