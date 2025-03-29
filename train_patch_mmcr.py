@@ -758,16 +758,16 @@ def train_mae():
                     x = model.patchify(imgs)
                     b,n,c = x.shape
                     x = x.reshape(b*n,c)                    
-                    z = vae.encoder(x)
-                    
-                    z = vae.reparameterize(z)
+                    mu, logvar = vae.encode(x)
+                    z = vae.reparameterize(mu, logvar)
 
                     z = z.reshape(b,n,-1)
                     z = F.normalize(z,dim=-1)
                     centroid = z.mean(dim=1)
 
-                    loss = -R_nonorm(centroid)
-
+                    loss_tcr = -R_nonorm(centroid)
+                    loss_kl = vae.kl_divergence(mu, logvar)
+                    loss = loss_tcr + loss_kl
                     
 
 
@@ -780,15 +780,16 @@ def train_mae():
                 x = model.patchify(imgs)
                 b,n,c = x.shape
                 x = x.reshape(b*n,c)                    
-                z = vae.encoder(x)
-                
-                z = vae.reparameterize(z)
+                mu, logvar = vae.encode(x)
+                z = vae.reparameterize(mu, logvar)
 
                 z = z.reshape(b,n,-1)
                 z = F.normalize(z,dim=-1)
                 centroid = z.mean(dim=1)
 
-                loss = -R_nonorm(centroid)
+                loss_tcr = -R_nonorm(centroid)
+                loss_kl = vae.kl_divergence(mu, logvar)
+                loss = loss_tcr + loss_kl
 
 
 
@@ -804,9 +805,8 @@ def train_mae():
                 current_lr = optimizer.param_groups[0]['lr']
                 print(f'Epoch: {epoch + 1}, Batch: {i + 1}, '
                       f'Loss: {avg_loss:.3f}, '
-                      f'Recon Loss: {recon_loss.item():.3f}, '
-                      f'KL Loss: {kl_loss.item():.3f}, '
-                      f'TCR Loss: {tcr_loss.item():.3f}, '
+                      f'KL Loss: {loss_kl.item():.3f}, '
+                      f'TCR Loss: {loss_tcr.item():.3f}, '
                       f'LR: {current_lr:.6f}')
         
         epoch_loss = total_loss / num_batches
