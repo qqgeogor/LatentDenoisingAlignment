@@ -405,7 +405,7 @@ def visualize_reconstruction(model,vae, images, mask_ratio=0.75, save_path='reco
         # sigmas = get_sigmas_karras(1, model.sampler.sigma_min, model.sampler.sigma_max, rho=model.sampler.rho, device="cpu")
         
         # pred1 = model.denoise(noised_x,latent,mask,ids_restore,sigmas[0])
-        
+
         x = model.patchify(images)
         b,n,c = x.shape
         x = x.reshape(b*n,c)   
@@ -781,7 +781,7 @@ def train_mae():
                         images_patch = model.patchify(imgs)
                         b,n,c = images_patch.shape
                         images_patch = images_patch.reshape(b*n,c)   
-                        z, log_det = vae.forward(x)
+                        z, log_det = vae.forward(images_patch)
                         
                         z_noise = torch.randn_like(z)
                         z_interp = z + z_noise*args.noise_scale
@@ -808,7 +808,7 @@ def train_mae():
                         images_patch = model.patchify(imgs)
                         b,n,c = images_patch.shape
                         images_patch = images_patch.reshape(b*n,c)   
-                        z, log_det = vae.forward(x)
+                        z, log_det = vae.forward(images_patch)
                         
                         z_noise = torch.randn_like(z)
                         z_interp = z + z_noise*args.noise_scale
