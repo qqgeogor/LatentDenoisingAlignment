@@ -91,7 +91,7 @@ class InvarianceFlow(nn.Module):
         tcr_loss = -R_nonorm(F.normalize(z, dim=-1))
         
         total_loss = loss.mean() + tcr_loss
-        return total_loss, loss.mean(), tcr_loss,z
+        return total_loss, loss.mean(), tcr_loss
 
 class CouplingLayer(nn.Module):
     def __init__(self, input_dim, hidden_dim):
@@ -139,6 +139,85 @@ class CouplingLayer(nn.Module):
         x = torch.cat([z1, x2], dim=-1)
         
         return x
+    
+
+
+class PatchAutoencoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, latent_dim=None):
+        super().__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.latent_dim = latent_dim if latent_dim is not None else hidden_dim // 2
+        
+        # Encoder
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, self.latent_dim),
+        )
+        
+        # Decoder
+        self.decoder = nn.Sequential(
+            nn.Linear(self.latent_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, input_dim),
+        )
+    
+    def encode(self, x):
+        z = self.encoder(x)
+        z = F.normalize(z,dim=-1)
+        return z
+        
+    def decode(self, z):
+        return self.decoder(z)
+    
+    def forward(self, x):
+        z = self.encode(x)
+        x_recon = self.decode(z)
+        return x_recon, z
+    
+    def prior_ll(self, z):
+        '''
+        Compute the prior log likelihood of the latent code , assuming standard normal prior
+        '''
+        return -0.5 * (z**2 + math.log(2 * math.pi)).sum(dim=1)
+    
+
+    
+    def forward_loss(self, x):
+        """
+        Compute the AE loss for the given input.
+        
+        Args:
+            x: Input tensor
+            
+        Returns:
+            A tuple containing:
+            - total_loss: The combined reconstruction and KL divergence loss
+            - recon_loss: The reconstruction loss component
+            - kl_loss: The KL divergence loss component
+        """
+        # Forward pass through the VAE
+        x_recon, z = self.forward(x)
+        
+        tcr_loss = -R_nonorm(F.normalize(z,dim=-1))
+        
+        # Compute reconstruction loss (MSE)
+        recon_loss = F.mse_loss(x_recon, x, reduction='none').sum(dim=-1).mean()
+        # recon_loss = (x_recon - x).pow(2).mean(-1).mean()
+        
+        # Compute KL divergence
+        kl_loss = -self.prior_ll(z).mean()
+        
+        # Combine losses
+        total_loss = recon_loss + kl_loss + tcr_loss
+        
+        # Return average loss over batch
+        return total_loss, recon_loss, kl_loss,tcr_loss,z
 
 class PatchVariationalAutoencoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim=None):

@@ -19,7 +19,7 @@ import math
 from timm.scheduler.cosine_lr import CosineLRScheduler
 from timm.optim import create_optimizer_v2
 from karas_sampler import KarrasSampler,get_sigmas_karras
-from vit import PatchVariationalAutoencoder
+from vit import PatchAutoencoder
 from einops import rearrange
 import seaborn as sns
 import os
@@ -35,7 +35,7 @@ import torch.nn.functional as F
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils_ibot import R_nonorm
+from contextlib import nullcontext
 
         
 class MaskedAutoencoderViT(nn.Module):
@@ -409,8 +409,7 @@ def visualize_reconstruction(model,vae, images, mask_ratio=0.75, save_path='reco
         b,n,c = x.shape
         x = x.reshape(b*n,c)   
 
-        mu, logvar = vae.encode(x)
-        z = vae.reparameterize(mu, logvar)
+        z = vae.encode(x)
         x_recon = vae.decode(z)
         x_recon = x_recon.reshape(b,n,c)
 
@@ -429,7 +428,7 @@ def visualize_reconstruction(model,vae, images, mask_ratio=0.75, save_path='reco
         # z_interp = torch.lerp(z, z_noise, (1/3)**0.5)
         
         z_interp = z + z_noise*(1/3)**0.5
-
+        
         x_recon_interp = vae.decode(z_interp)
         x_recon_interp = x_recon_interp.reshape(b,n,c)
         pred3 = model.unpatchify(x_recon_interp)
@@ -682,7 +681,7 @@ def train_mae():
         use_checkpoint=args.use_checkpoint
     ).to(device)
 
-    vae = PatchVariationalAutoencoder(
+    vae = PatchAutoencoder(
         input_dim=3*args.patch_size**2,
         hidden_dim=args.embed_dim,
         latent_dim=args.embed_dim//2
@@ -752,47 +751,26 @@ def train_mae():
         
         for i, (imgs, _) in enumerate(trainloader):
             imgs = imgs.to(device)
-            optimizer.zero_grad()    
-            if args.use_amp:
-                with autocast():
-                    x = model.patchify(imgs)
-                    b,n,c = x.shape
-                    x = x.reshape(b*n,c)                    
-                    mu, logvar = vae.encode(x)
-                    z = vae.reparameterize(mu, logvar)
-
-                    z = z.reshape(b,n,-1)
-                    z = F.normalize(z,dim=-1)
-                    centroid = z.mean(dim=1)
-
-                    loss_tcr = -R_nonorm(centroid).mean()
-                    loss_kl = vae.kl_divergence(mu, logvar).mean()
-                    loss = loss_tcr + loss_kl
-                    # loss = loss_tcr
-
-
-
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                
+            optimizer.zero_grad()
+       
+            with autocast() if args.use_amp else nullcontext():
                 x = model.patchify(imgs)
                 b,n,c = x.shape
                 x = x.reshape(b*n,c)                    
-                mu, logvar = vae.encode(x)
-                z = vae.reparameterize(mu, logvar)
+                _,recon_loss,kl_loss,tcr_loss,z = vae.forward_loss(x)
+                loss = recon_loss + kl_loss + tcr_loss
 
                 z = z.reshape(b,n,-1)
-                z = F.normalize(z,dim=-1)
-                centroid = z.mean(dim=1)
+                z1 = z[:,0,:]
+                z2 = z[:,1,:]
+                loss_cos = 1-F.cosine_similarity(z1,z2,dim=-1).mean()
+                    
+            if args.use_amp:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
 
-                loss_tcr = -R_nonorm(centroid).mean()
-                loss_kl = vae.kl_divergence(mu, logvar).mean()
-                loss = loss_tcr + loss_kl
-                # loss = loss_tcr
-
-
+            else:
                 loss.backward()
                 optimizer.step()
             
@@ -805,8 +783,10 @@ def train_mae():
                 current_lr = optimizer.param_groups[0]['lr']
                 print(f'Epoch: {epoch + 1}, Batch: {i + 1}, '
                       f'Loss: {avg_loss:.3f}, '
-                      f'KL Loss: {loss_kl.item():.3f}, '
-                      f'TCR Loss: {loss_tcr.item():.3f}, '
+                      f'Recon Loss: {recon_loss.item():.3f}, '
+                      f'KL Loss: {kl_loss.item():.3f}, '
+                      f'TCR Loss: {tcr_loss.item():.3f}, '
+                      f'Cos Loss: {loss_cos.item():.3f}, '
                       f'LR: {current_lr:.6f}')
         
         epoch_loss = total_loss / num_batches
