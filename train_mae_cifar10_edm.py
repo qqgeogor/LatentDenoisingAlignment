@@ -171,7 +171,7 @@ class MaskedAutoencoderViT(nn.Module):
                 x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
             else:
                 x = blk(x)
-        x = self.norm(x)[:,0,:]
+        x = self.norm(x)
         return x
 
     def forward_encoder(self, x, mask_ratio):

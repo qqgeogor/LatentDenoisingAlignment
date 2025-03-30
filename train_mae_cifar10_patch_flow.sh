@@ -15,7 +15,7 @@
 
 python train_mae_cifar10_patch_flow.py \
     --use_amp \
-    --output_dir ../../autodl-tmp/output_patch_vdae/  \
+    --output_dir ../../autodl-tmp/output_patch_flow_dae/  \
     --img_size 128 \
     --patch_size 16 \
     --pretrained_flow ../../autodl-tmp/output_pflow/checkpoint_epoch_99.pth \
