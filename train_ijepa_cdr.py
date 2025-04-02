@@ -828,7 +828,7 @@ def train_mae():
                 
                 
                 loss, loss_tcr, loss_cos = simsiam_loss(z, h,lambda1=2e-2)
-                loss = F.smooth_l1_loss(z, h).mean(-1).mean()
+                
                 
                 
             # Backward pass with gradient scaling if using AMP

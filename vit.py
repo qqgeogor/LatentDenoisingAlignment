@@ -21,6 +21,7 @@ from timm.optim import create_optimizer_v2
 import torch.nn.functional as F
 from einops import rearrange
 import seaborn as sns
+from masks.utils import apply_masks
 
 import os
 os.environ['MPLBACKEND'] = 'Agg'  # Set this before importing matplotlib
@@ -443,12 +444,62 @@ class MaskedAutoencoderViT(nn.Module):
         mask = torch.gather(mask, dim=1, index=ids_restore)
 
         return x_masked, mask, ids_restore
+    
 
+    def forward_predictor(self, x, masks_x=None, masks=None):
 
-    def forward_feature(self, x):
+        if not isinstance(masks_x, list):
+            masks_x = [masks_x]
+
+        if not isinstance(masks, list):
+            masks = [masks]
+
+        # -- Batch Size
+        B = len(x) // len(masks_x)
+
+        # -- map from encoder-dim to pedictor-dim
+        x = self.decoder_embed(x)
+
+        # -- add positional embedding to x tokens
+        if masks_x is not None:        
+            x_pos_embed = self.decoder_pos_embed.repeat(B, 1, 1)
+            # print(x_pos_embed.shape)
+
+            x += apply_masks(x_pos_embed, masks_x)
+        else:
+            x += self.decoder_pos_embed
+
+        _, N_ctxt, D = x.shape
+
+        # -- concat mask tokens to x
+        if masks is not None:        
+            pos_embs = self.decoder_pos_embed.repeat(B, 1, 1)
+            pos_embs = apply_masks(pos_embs, masks)
+        # --
+        pred_tokens = self.mask_token.repeat(pos_embs.size(0), pos_embs.size(1), 1)
+        # --
+        pred_tokens += pos_embs
+        x = x.repeat(len(masks), 1, 1)
+        x = torch.cat([x, pred_tokens], dim=1)
+
+        # -- fwd prop
+        for blk in self.decoder_blocks:
+            x = blk(x)
+        x = self.decoder_norm(x)
+
+        # -- return preds for mask tokens
+        x = x[:, N_ctxt:]
+        x = self.proj_head(x)
+
+        return x
+    
+
+    def forward_feature(self, x,masks=None):
         x = self.patch_embed(x)
         x = x + self.pos_embed[:, 1:, :]
-
+        if masks is not None:
+            x = apply_masks(x, masks)
+        
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
         cls_tokens = cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
@@ -479,24 +530,24 @@ class MaskedAutoencoderViT(nn.Module):
 
         return x, mask, ids_restore
 
+    
+    # def forward_predictor(self, x):
+    #     x = self.decoder_embed(x)
 
-    def forward_predictor(self, x):
-        x = self.decoder_embed(x)
+    #     x = x + self.decoder_pos_embed
 
-        x = x + self.decoder_pos_embed
-
-        for blk in self.decoder_blocks:
-            if self.use_checkpoint and self.training:
-                x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
-            else:
-                x = blk(x)
-        x = self.decoder_norm(x)
-        x = self.proj_head(x)
-        # x = self.decoder_pred(x)
-        x = x[:, 1:, :]  # Remove CLS token
+    #     for blk in self.decoder_blocks:
+    #         if self.use_checkpoint and self.training:
+    #             x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
+    #         else:
+    #             x = blk(x)
+    #     x = self.decoder_norm(x)
+    #     x = self.proj_head(x)
+    #     # x = self.decoder_pred(x)
+    #     x = x[:, 1:, :]  # Remove CLS token
         
 
-        return x
+    #     return x
 
 
     def forward_decoder(self, x,noised_image, mask,ids_restore):
