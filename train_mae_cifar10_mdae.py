@@ -22,14 +22,16 @@ import utils_ibot as utils
 from vit import MaskedAutoencoderViT
 import torch.nn.functional as F
 from tqdm import tqdm
+import contextlib
 
 def mcr_nv_loss(ps):
+    ps = F.normalize(ps,dim=-1)
     N = ps.shape[0]
     C = ps.shape[-1]
     B = ps.shape[-2]
-
+    
     loss_expd = R_nonorm(ps)
-
+    
     loss_comp = R_nonorm(ps.transpose(0,1))*1.2
     
     return loss_expd.mean(),loss_comp.mean()
@@ -45,11 +47,12 @@ def mcr_nv_loss_gram(ps):
 
     
     # ps n b c -> n c b 
-    loss_expd = R_nonorm(F.normalize(ps.permute(0,2,1),dim=-1))
+    # loss_expd = R_nonorm(F.normalize(ps.permute(0,2,1),dim=-1))
+    loss_expd = R_nonorm(ps)
     
 
     # # ps n b c -> b c n 
-    loss_comp = R_nonorm(F.normalize(ps.permute(1,2,0),dim=-1))*5
+    loss_comp = R_nonorm(F.normalize(ps.permute(1,2,0),dim=-1))#*5
     
     return loss_expd.mean(),loss_comp.mean()
 
@@ -400,7 +403,7 @@ def train_mae():
             optimizer.zero_grad()
             
             # Use autocast for mixed precision
-            with autocast(enabled=args.use_amp):
+            with autocast(enabled=args.use_amp) if args.use_amp else contextlib.nullcontext():
                 ps = []
                 # Process all views in a single batch for efficiency
                 cat_views = torch.cat(views, dim=0)
@@ -415,9 +418,20 @@ def train_mae():
                 # n,b,c
                 n,b,c = ps.shape
                 
+                # print('ps.shape',ps.shape)
+
                 expd_loss, comp_loss = mcr_nv_loss_gram(ps)
-                loss_mcr = -expd_loss + comp_loss
+                loss_mcr = -expd_loss/(b-1) + comp_loss/(n-1)
+                
+                # logdet = torch.log(1-F.cosine_similarity(ps[0], ps[-1], dim=-1)**2+1e-6).mean()
                 loss_cos = (1 - F.cosine_similarity(ps[0], ps[-1], dim=-1).mean())
+
+                # ps = F.normalize(ps,dim=-1).permute(1,2,0)
+                # cov = ps.transpose(-2,-1)@ps
+                # # print('cov.shape',cov.shape)
+                # I = torch.eye(cov.shape[-1]).to(device)
+                # logdet2 = torch.logdet(cov+1e-6).mean()
+     
 
 
                 # n_group = int(b/n)
@@ -437,13 +451,14 @@ def train_mae():
                 # loss_cos = loss_cos/n_group
                 
 
-                # # expd_loss, comp_loss = mcr_nv_loss(ps)
-                # # loss_mcr = -expd_loss + comp_loss
-                # # loss_cos = (1 - F.cosine_similarity(ps[0], ps[-1], dim=-1).mean())
+                # expd_loss, comp_loss = mcr_nv_loss(ps)
+                # loss_mcr = -expd_loss + comp_loss
+                # loss_cos = (1 - F.cosine_similarity(ps[0], ps[-1], dim=-1).mean())
 
                 
                 # Final loss
-                loss = loss_mcr  # + loss_gp*args.gp_weight
+                # loss = loss_mcr  # + loss_gp*args.gp_weight
+                loss = -expd_loss*1e-2 + loss_cos
             
             # Use scaler for backward and optimizer step if AMP is enabled
             num_batches +=1

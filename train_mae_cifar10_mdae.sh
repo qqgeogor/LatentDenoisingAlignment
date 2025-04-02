@@ -1,12 +1,13 @@
-python train_mae_cifar10_sdae.py \
+python train_mae_cifar10_mdae.py \
     --use_amp \
-    --output_dir ../../autodl-tmp/output_sdae/  \
+    --output_dir ../../autodl-tmp/output_mdae/  \
     --img_size 128 \
     --patch_size 16 \
     --dataset 'tiny-imagenet' \
     --data_path '../../autodl-tmp/tiny-imagenet-200/train'  \
     --save_freq 5 \
-    --num_views 16 \
+    --num_views 2 \
     --batch_size 128 \
     --use_checkpoint \
+    --resume ../../autodl-tmp/output_mdae/checkpoint_epoch_10.pth \
     --epochs 800

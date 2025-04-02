@@ -804,7 +804,8 @@ def train_mae():
                     # h3,mask3,ids_restore3 = teacher_model.forward_encoder(imgs, mask_ratio=args.mask_ratio)
                     # z3 = teacher_model.forward_decoder(h3,ids_restore3)
                     z3 = teacher_model.forward_feature(imgs)[:,1:]
-                    z3 = F.normalize(z3,dim=-1)
+                    # z3 = F.normalize(z3,dim=-1)
+                    z3 = F.layer_norm(z3, (z3.size(-1),))
                     z3 = z3.detach()
 
                 loss = 0
@@ -812,16 +813,18 @@ def train_mae():
                     h1,mask1,ids_restore1 = model.forward_encoder(imgs, mask_ratio=args.mask_ratio)
                     z1 = model.forward_decoder(h1,ids_restore1)
                     
-                    z1 = F.normalize(z1,dim=-1)
+                    # z1 = F.normalize(z1,dim=-1)
                     
                     
 
-                    # mask = (mask1 > 0).bool() & (mask2 > 0).bool()
-                    mask = (mask1>0).bool()
+                    # # mask = (mask1 > 0).bool() & (mask2 > 0).bool()
+                    # mask = (mask1>0).bool()
                     
-                    loss_tcr = -R_nonorm(z1.reshape(-1,z1.shape[-1])).mean()*1e-2
+                    loss_tcr = -R_nonorm(F.normalize(z1,dim=-1).reshape(-1,z1.shape[-1])).mean()*1e-2
                     loss_cos = 1 - F.cosine_similarity(z1,z3,dim=-1).mean(-1).mean()
-                    loss += loss_tcr + loss_cos
+                    
+                    loss = F.smooth_l1_loss(z1, z3)
+                    loss += loss.mean()
                     # loss+= F.mse_loss(z1,z3,reduction='none').mean(-1).mean()
                 loss = loss/args.num_views
 

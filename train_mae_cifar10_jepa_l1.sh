@@ -1,6 +1,6 @@
-python train_mae_cifar10_jepa_dec_dino.py \
+python train_mae_cifar10_jepa_l1.py \
     --use_amp \
-    --output_dir ../../autodl-tmp/output_jepa/  \
+    --output_dir ../../autodl-tmp/output_jepa_l1/  \
     --img_size 128 \
     --patch_size 16 \
     --dataset 'tiny-imagenet' \

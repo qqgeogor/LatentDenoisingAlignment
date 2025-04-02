@@ -31,6 +31,8 @@ matplotlib.use('Agg')  # Set this before importing pyplot
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 
+from vit import PatchVariationalAutoencoder
+
 def R(Z,eps=0.5):
     Z = F.normalize(Z,dim=-1)
     b = Z.shape[-2]
@@ -131,6 +133,12 @@ class MaskedAutoencoderViT(nn.Module):
             nn.Linear(decoder_embed_dim, decoder_embed_dim*4),
             nn.GELU(),
             nn.Linear(decoder_embed_dim*4, decoder_embed_dim),
+        )
+
+        self.vae_projector = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim*4),
+            nn.GELU(),
+            nn.Linear(embed_dim*4, embed_dim//2),
         )
 
         self.norm_pix_loss = norm_pix_loss
@@ -616,7 +624,8 @@ def get_args_parser():
                         help='Use mixed precision training')
     parser.add_argument('--use_checkpoint', action='store_true',default=True,
                         help='Use gradient checkpointing to save memory')
-    
+    parser.add_argument('--pretrained_vae', default='',
+                        help='Path to pretrained VAE checkpoint')
     # Logging and saving
     parser.add_argument('--output_dir', default='F:/output/mae_cifar10_jepa_sim_dino2',
                         help='Path where to save checkpoints and logs')
@@ -728,6 +737,15 @@ def train_mae():
         use_checkpoint=args.use_checkpoint
     ).to(device)
 
+    vae = PatchVariationalAutoencoder(
+        input_dim=3*args.patch_size**2,
+        hidden_dim=args.embed_dim,
+        latent_dim=args.embed_dim//2
+    ).to(device)
+    
+    checkpoint = torch.load(args.pretrained_vae, map_location=device)
+    vae.load_state_dict(checkpoint['vae_state_dict'])
+    
     # Create optimizer with explicit betas
     optimizer = create_optimizer_v2(
         model,
@@ -760,6 +778,7 @@ def train_mae():
             print(f"Loading checkpoint from {args.resume}")
             checkpoint = torch.load(args.resume, map_location=device)
             model.load_state_dict(checkpoint['model_state_dict'])
+            
             teacher_model.load_state_dict(checkpoint['teacher_model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             if 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict']:
@@ -803,9 +822,13 @@ def train_mae():
                 with torch.no_grad():
                     # h3,mask3,ids_restore3 = teacher_model.forward_encoder(imgs, mask_ratio=args.mask_ratio)
                     # z3 = teacher_model.forward_decoder(h3,ids_restore3)
-                    z3 = teacher_model.forward_feature(imgs)[:,1:]
-                    z3 = F.normalize(z3,dim=-1)
-                    z3 = z3.detach()
+                    images_patch = model.patchify(imgs)
+                    b,n,c = images_patch.shape
+                    images_patch = images_patch.reshape(b*n,c) 
+                    
+                    z3 = vae.encoder(images_patch)
+                    z3 = z3.reshape(b,n,-1)
+
 
                 loss = 0
                 for _ in range(args.num_views):

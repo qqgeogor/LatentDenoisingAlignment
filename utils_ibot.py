@@ -230,6 +230,111 @@ class SVDPatchPCANoise(nn.Module):
 
 
 
+# class SubGraphSVDPatchPCANoise(nn.Module):
+#     """Module for applying PCA-based noise to image patches."""
+    
+#     def __init__(self, patch_size=4, noise_scale=0.5, kernel='linear', gamma=1.0):
+#         super().__init__()
+#         self.patch_size = patch_size
+#         self.noise_scale = noise_scale
+#         self.ema_cov = None
+
+#     def inverse_transform(self, x_components):
+#         B, N, C = x_components.shape
+#         x_components = x_components.reshape(B*N, C)
+#         return (x_components @ self.ema_eig_vecs.T).reshape(B, N, C)
+
+#     def forward(self, x, return_patches=False):
+#         if not self.training:
+#             return x
+
+#         B, C, H, W = x.shape
+#         p = self.patch_size
+#         assert H % p == 0 and W % p == 0, "Image dimensions must be divisible by patch size"
+
+#         # Extract patches (B, C, H, W) -> (B, num_patches, C*p*p)
+#         x_patches = x.unfold(2, p, p).unfold(3, p, p)  # (B, C, H/p, W/p, p, p)
+#         x_patches = x_patches.permute(0, 2, 3, 1, 4, 5)  # (B, H/p, W/p, C, p, p)
+#         num_patches_h, num_patches_w = x_patches.size(1), x_patches.size(2)
+
+#         # x_patches = rearrange(x_patches, 'b h w c p1 p2 -> b (h p1) (w p2) c p1 p2')
+#         x_patches = rearrange(x_patches, 'b h w c p1 p2 -> b (p1 p2) (c h w) ')
+#         D = x_patches.shape[-1]
+        
+#         # x_patches = x_patches.reshape(B, num_patches_h * num_patches_w, C * p * p)
+
+        
+        
+
+#         # Flatten all patches across batch and spatial dimensions
+#         all_patches = x_patches.reshape(-1, D)  # (B*num_patches_total, C*p*p)
+#         # print('all_patches',all_patches.shape)
+#         # Compute PCA components
+#         with torch.no_grad():
+#             mean = all_patches.mean(dim=0)
+#             centered = all_patches - mean
+
+#             n = centered.size(0)
+#             u, s, v = torch.linalg.svd(centered, full_matrices=False)
+#             eig_vals = (s**2)/(n-1 + 1e-6)
+#             eig_vecs = v.T
+
+#             idx = torch.argsort(eig_vals, descending=True)
+#             eig_vals = eig_vals[idx]
+#             eig_vecs = eig_vecs[:, idx]
+
+#             valid_components = torch.sum(eig_vals > 1e-6)
+#             self.valid_components = valid_components
+#             eig_vals = eig_vals[:valid_components]
+#             eig_vecs = eig_vecs[:, :valid_components]
+            
+#             self.ema_eig_vals = eig_vals
+#             self.ema_eig_vecs = eig_vecs
+        
+#         noise_coeff = torch.randn(all_patches.size(0), self.valid_components).to(all_patches.device)
+#         scaled_noise = noise_coeff * (self.ema_eig_vals.sqrt()).unsqueeze(0)
+#         pca_noise = scaled_noise @ self.ema_eig_vecs.T
+
+#         # Reshape noise and add to original patches
+#         pca_noise = pca_noise.reshape_as(x_patches)
+#         noisy_patches = x_patches + pca_noise
+#         # print('noisy_patches',noisy_patches.shape)
+#         # Calculate noise energy per patch
+#         noise_energy = torch.sum(pca_noise**2, dim=-1)  # L2 norm squared per patch
+        
+#         # Normalize to create weights - can use different normalization strategies
+#         patch_weights = noise_energy / noise_energy.max()  # Simple min-max normalization
+#         # print('noise_energy',noise_energy.shape)
+#         # print('pca_noise',pca_noise.shape)
+#         # print('patch_weights',patch_weights.shape)
+
+#         # Alternative: softmax-based weighting
+#         # patch_weights = F.softmax(noise_energy / temperature, dim=0)
+        
+#         # Reshape weights to match the original patch dimensions
+#         patch_weights = patch_weights.reshape(B, -1)
+        
+#         # Store the weights for later use in the model
+#         self.patch_weights = patch_weights
+
+
+#         # Reconstruct noisy image from patches
+#         # noisy_patches = noisy_patches.reshape(B, num_patches_h, num_patches_w, C, p, p)
+        
+#         noisy_patches = rearrange(noisy_patches, 'b (p1 p2) (c h w) -> b h w c p1 p2',b=B, p1=p, p2=p, c=C,h=num_patches_h,w=num_patches_w)
+#         noisy_patches = noisy_patches.permute(0, 3, 1, 4, 2, 5)  # (B, C, H/p, p, W/p, p)
+#         noisy_image = noisy_patches.reshape(B, C, H, W)
+
+#         if return_patches:
+#             components = all_patches @ self.ema_eig_vecs
+#             components = components * torch.sqrt(self.ema_eig_vals + 1e-8).unsqueeze(0)
+#             x_components = components.reshape_as(x_patches)
+#             return noisy_image, x_components
+#         else:
+#             return noisy_image
+
+
+
 class SubGraphSVDPatchPCANoise(nn.Module):
     """Module for applying PCA-based noise to image patches."""
     
@@ -256,18 +361,11 @@ class SubGraphSVDPatchPCANoise(nn.Module):
         x_patches = x.unfold(2, p, p).unfold(3, p, p)  # (B, C, H/p, W/p, p, p)
         x_patches = x_patches.permute(0, 2, 3, 1, 4, 5)  # (B, H/p, W/p, C, p, p)
         num_patches_h, num_patches_w = x_patches.size(1), x_patches.size(2)
+        x_patches = x_patches.reshape(B, num_patches_h * num_patches_w, C * p * p)
 
-        # x_patches = rearrange(x_patches, 'b h w c p1 p2 -> b (h p1) (w p2) c p1 p2')
-        x_patches = rearrange(x_patches, 'b h w c p1 p2 -> b (p1 p2) (c h w) ')
-        D = x_patches.shape[-1]
-        
-        # x_patches = x_patches.reshape(B, num_patches_h * num_patches_w, C * p * p)
-
-        
-        
-
+        # x_patches = x_patches.transpose(-2,-1)
         # Flatten all patches across batch and spatial dimensions
-        all_patches = x_patches.reshape(-1, D)  # (B*num_patches_total, C*p*p)
+        all_patches = x_patches.reshape(-1, C*p*p)  # (B*num_patches_total, C*p*p)
 
         # Compute PCA components
         with torch.no_grad():
@@ -293,12 +391,25 @@ class SubGraphSVDPatchPCANoise(nn.Module):
         
         noise_coeff = torch.randn(all_patches.size(0), self.valid_components).to(all_patches.device)
         scaled_noise = noise_coeff * (self.ema_eig_vals.sqrt()).unsqueeze(0)
-        pca_noise = scaled_noise @ self.ema_eig_vecs.T
+    
 
-        # Reshape noise and add to original patches
+        # After computing eigenvalues and eigenvectors...
+        noise_coeff = torch.randn(all_patches.size(0), self.valid_components).to(all_patches.device)
+        
+
+        
+        ## make scale factor b*1, range from 0.4~0.7    
+        scaling_factor = torch.rand(all_patches.size(0),1) * 0.3 + 0.4
+        scaling_factor = scaling_factor.to(all_patches.device)
+        latent_noise = noise_coeff * (self.ema_eig_vals.sqrt()).unsqueeze(0)
+        
+        # print('scaling_factor',scaling_factor)
+        # Apply scaling to noise in latent space
+
+        pca_noise = scaling_factor*latent_noise @ self.ema_eig_vecs.T
         pca_noise = pca_noise.reshape_as(x_patches)
         noisy_patches = x_patches + pca_noise
-
+        
         # Calculate noise energy per patch
         noise_energy = torch.sum(pca_noise**2, dim=-1)  # L2 norm squared per patch
         
@@ -317,21 +428,97 @@ class SubGraphSVDPatchPCANoise(nn.Module):
         # Store the weights for later use in the model
         self.patch_weights = patch_weights
 
-
-        # Reconstruct noisy image from patches
-        # noisy_patches = noisy_patches.reshape(B, num_patches_h, num_patches_w, C, p, p)
+        # noisy_patches = noisy_patches.transpose(-2,-1)
         
-        noisy_patches = rearrange(noisy_patches, 'b (p1 p2) (c h w) -> b h w c p1 p2', p1=p, p2=p, c=C)
+        # Reconstruct noisy image from patches
+        noisy_patches = noisy_patches.reshape(B, num_patches_h, num_patches_w, C, p, p)
         noisy_patches = noisy_patches.permute(0, 3, 1, 4, 2, 5)  # (B, C, H/p, p, W/p, p)
         noisy_image = noisy_patches.reshape(B, C, H, W)
 
         if return_patches:
-            components = all_patches @ self.ema_eig_vecs
-            components = components * torch.sqrt(self.ema_eig_vals + 1e-8).unsqueeze(0)
-            x_components = components.reshape_as(x_patches)
-            return noisy_image, x_components
+            pca_noise = pca_noise.reshape(B, num_patches_h, num_patches_w, C, p, p) 
+            pca_noise = pca_noise.permute(0, 3, 1, 4, 2, 5)  # (B, C, H/p, p, W/p, p)
+            pca_noise = pca_noise.reshape(B, C, H, W)
+            return noisy_image, pca_noise
         else:
             return noisy_image
+
+
+
+
+class BernoulliPCANoise(nn.Module):
+    def __init__(self, patch_size=4, target_snr=0.75):
+        super().__init__()
+        self.patch_size = patch_size
+        self.target_snr = target_snr
+        
+    def forward(self, x, return_patches=False):
+        if not self.training:
+            return x
+            
+        B, C, H, W = x.shape
+        p = self.patch_size
+        
+        # 提取patches
+        x_patches = x.unfold(2, p, p).unfold(3, p, p)
+        x_patches = x_patches.permute(0, 2, 3, 1, 4, 5)
+        num_patches_h, num_patches_w = x_patches.size(1), x_patches.size(2)
+        x_patches = x_patches.reshape(B, num_patches_h * num_patches_w, C * p * p)
+        
+
+        all_patches = x_patches.reshape(-1, C*p*p)
+        # 计算PCA
+        with torch.no_grad():
+            # 中心化
+            mean = all_patches.mean(dim=0)
+            centered = all_patches - mean
+            
+            # SVD分解
+            u, s, v = torch.linalg.svd(centered, full_matrices=False)
+            
+            # 计算特征值（奇异值的平方）
+            eig_vals = s ** 2
+            
+            # 计算信号总能量
+            signal_power = torch.sum(eig_vals)
+            
+            # 根据目标SNR计算总噪声能量
+            target_noise_power = signal_power / self.target_snr
+            
+            # 根据特征值大小设计伯努利概率
+            # 特征值越大，被置零的概率越大
+            probs = eig_vals / eig_vals.max()
+            
+            # 生成伯努利噪声掩码
+            mask = torch.bernoulli(probs).to(x.device)
+            
+            # 缩放系数，确保总噪声能量符合目标SNR
+            scale = torch.sqrt(target_noise_power / (torch.sum(eig_vals * mask) + 1e-8))
+            
+            # 应用噪声
+            noisy_s = s * (1 - mask * scale)
+            noisy_s = torch.diag(noisy_s)
+
+            # 重建带噪声的数据
+            noisy_patches = u @ noisy_s @ v
+            noisy_patches = noisy_patches + mean
+            
+            
+            # # 验证实际SNR（调试用）
+            # actual_noise = noisy_patches - all_patches
+            # actual_noise_power = torch.mean(actual_noise**2)
+            # actual_signal_power = torch.mean(all_patches**2)
+            # actual_snr = actual_signal_power / actual_noise_power
+            # print(f"Actual SNR: {actual_snr:.3f}")
+            
+            
+            # 重构图像
+            noisy_patches = noisy_patches.reshape(B, num_patches_h, num_patches_w, C, p, p)
+            noisy_patches = noisy_patches.permute(0, 3, 1, 4, 2, 5)
+            noisy_image = noisy_patches.reshape(B, C, H, W)
+            
+            return noisy_image
+
 
 class MaxSVDPatchPCANoise(nn.Module):
     """Module for applying PCA-based noise to image patches."""
@@ -346,7 +533,8 @@ class MaxSVDPatchPCANoise(nn.Module):
         B, N, C = x_components.shape
         x_components = x_components.reshape(B*N, C)
         return (x_components @ self.ema_eig_vecs.T).reshape(B, N, C)
-
+    
+    @torch.no_grad()
     def forward(self, x, return_patches=False):
         if not self.training:
             return x
@@ -814,7 +1002,7 @@ class BatchwiseKernelPatchPCANoise(nn.Module):
             return noisy_image
     
 
-def R_nonorm(Z, eps=0.5, if_fast=True):
+def R_nonorm(Z, eps=0.5, if_fast=False):
     """Compute the log-determinant term."""
     b = Z.size(-2)
     c = Z.size(-1)

@@ -28,30 +28,13 @@ def mcr_nv_loss(ps):
     C = ps.shape[-1]
     B = ps.shape[-2]
 
-    loss_expd = R_nonorm(ps)
-
-    loss_comp = R_nonorm(ps.transpose(0,1))*1.2
     
-    return loss_expd.mean(),loss_comp.mean()
+    centroid = ps.mean(dim=0)
 
+    loss_mmcr = -R_nonorm(centroid)
 
+    return loss_mmcr.mean()
 
-def mcr_nv_loss_gram(ps):
-    N = ps.shape[0]
-    C = ps.shape[-1]
-    B = ps.shape[-2]
-
-    ps = F.normalize(ps,dim=-1)
-
-    
-    # ps n b c -> n c b 
-    loss_expd = R_nonorm(F.normalize(ps.permute(0,2,1),dim=-1))
-    
-
-    # # ps n b c -> b c n 
-    loss_comp = R_nonorm(F.normalize(ps.permute(1,2,0),dim=-1))*5
-    
-    return loss_expd.mean(),loss_comp.mean()
 
 
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
@@ -186,7 +169,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser('MAE training for CIFAR-10', add_help=False)
     
     # Add dataset arguments
-    parser.add_argument('--dataset', default='cifar10', type=str, choices=['cifar10', 'tiny-imagenet','imagenet-100'],
+    parser.add_argument('--dataset', default='tiny-imagenet', type=str, choices=['cifar10', 'tiny-imagenet','imagenet-100'],
                         help='Dataset to use (cifar10 or tiny-imagenet or imagenet-100 )')
     parser.add_argument('--data_path', default='c:/dataset', type=str,
                         help='Path to dataset root directory')
@@ -323,6 +306,9 @@ def train_mae():
     )
 
 
+
+
+
     trainloader = DataLoader(trainset, batch_size=args.batch_size,
                            shuffle=True, num_workers=args.num_workers)
 
@@ -401,8 +387,7 @@ def train_mae():
             
             # Use autocast for mixed precision
             with autocast(enabled=args.use_amp):
-                ps = []
-                # Process all views in a single batch for efficiency
+               # Process all views in a single batch for efficiency
                 cat_views = torch.cat(views, dim=0)
                 cat_features = model.forward_feature(cat_views)[:,0]
                 cat_projections = model.proj_head(cat_features)
@@ -410,40 +395,16 @@ def train_mae():
                 # Split the results back into separate views
                 ps = cat_projections.chunk(len(views), dim=0)
                 ps = torch.stack(ps, dim=0)
+                ps = F.normalize(ps,dim=-1)
                 
                 
-                # n,b,c
-                n,b,c = ps.shape
-                
-                expd_loss, comp_loss = mcr_nv_loss_gram(ps)
-                loss_mcr = -expd_loss + comp_loss
+                mmcr_loss = mcr_nv_loss(ps)
+
                 loss_cos = (1 - F.cosine_similarity(ps[0], ps[-1], dim=-1).mean())
-
-
-                # n_group = int(b/n)
-                # batch_size_per_group = n
-                # ps_group = ps.reshape(n,n_group,batch_size_per_group,c).transpose(0,1)
-                # loss_mcr = 0
-                # loss_cos = 0
-                # for sub_ps in ps_group:
-                #     sub_ps = F.normalize(sub_ps, dim=-1)
-                #     expd_loss, comp_loss = mcr_nv_loss(sub_ps)
-                #     loss_mcr += -expd_loss + comp_loss
-                #     loss_cos += (1 - F.cosine_similarity(sub_ps[0], sub_ps[-1], dim=-1).mean())
-
-
-
-                # loss_mcr = loss_mcr/n_group
-                # loss_cos = loss_cos/n_group
-                
-
-                # # expd_loss, comp_loss = mcr_nv_loss(ps)
-                # # loss_mcr = -expd_loss + comp_loss
-                # # loss_cos = (1 - F.cosine_similarity(ps[0], ps[-1], dim=-1).mean())
 
                 
                 # Final loss
-                loss = loss_mcr  # + loss_gp*args.gp_weight
+                loss = mmcr_loss  # + loss_gp*args.gp_weight
             
             # Use scaler for backward and optimizer step if AMP is enabled
             num_batches +=1
@@ -459,8 +420,8 @@ def train_mae():
             
             if i % args.log_freq == 0:
                 print(f'Epoch [{epoch+1}/{args.epochs}], Step [{i}/{len(trainloader)}], '
-                      f'Loss_expd: {expd_loss.item():.4f}, Loss_comp: {comp_loss.item():.4f}, '
-                      f'Loss: {loss.item():.4f},  Loss_mcr: {loss_mcr.item():.4f}, Loss_cos: {loss_cos.item():.4f}, '
+                      f'Loss_mmcr: {mmcr_loss.item():.4f}, '
+                      f'Loss: {loss.item():.4f},  Loss_cos: {loss_cos.item():.4f}, '
                       f'LR: {lr:.6f}, WD: {weight_decay:.6f}')
             
         epoch_loss = total_loss / num_batches
