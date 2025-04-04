@@ -493,6 +493,7 @@ class MaskedAutoencoderViT(nn.Module):
 
         return x
     
+    
 
     def forward_feature(self, x,masks=None):
         x = self.patch_embed(x)
@@ -550,21 +551,23 @@ class MaskedAutoencoderViT(nn.Module):
     #     return x
 
 
-    def forward_decoder(self, x,noised_image, mask,ids_restore):
+    def forward_decoder(self, x,noised_image=None, mask=None,ids_restore=None):
         x = self.decoder_embed(x)
-
-        mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
-        x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)
-        x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))
-
-        x_dec = self.patch_embed_decoder(noised_image)
-
-        x_ = (1-mask.unsqueeze(-1)) * x_ + mask.unsqueeze(-1) * x_dec
-
         
-        x = torch.cat([x[:, :1, :], x_], dim=1)
+        
+        if noised_image is not None:
+            mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
+            x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)
+            x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))
 
-        x = x + self.decoder_pos_embed
+            x_dec = self.patch_embed_decoder(noised_image)
+
+            x_ = (1-mask.unsqueeze(-1)) * x_ + mask.unsqueeze(-1) * x_dec
+        
+            
+            x = torch.cat([x[:, :1, :], x_], dim=1)
+
+            x = x + self.decoder_pos_embed
 
         for blk in self.decoder_blocks:
             if self.use_checkpoint and self.training:
