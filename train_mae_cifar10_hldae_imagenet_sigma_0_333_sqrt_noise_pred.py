@@ -546,6 +546,9 @@ def get_args_parser():
     parser.add_argument('--warmup_epochs', default=10, type=int,
                         help='Number of epochs for warmup')
     
+    parser.add_argument('--noiser_patch_size', default=16, type=int,
+                    help='Patch size for Noiser')
+
     # System parameters
     parser.add_argument('--num_workers', default=8, type=int,
                         help='Number of data loading workers')
@@ -638,7 +641,7 @@ def train_mae():
     trainloader = DataLoader(trainset, batch_size=args.batch_size,
                            shuffle=True, num_workers=args.num_workers)
 
-    pca_noiser = PatchPCANoise(patch_size=args.patch_size, noise_scale=args.noise_scale)
+    pca_noiser = PatchPCANoise(patch_size=args.noiser_patch_size, noise_scale=args.noise_scale)
 
     # Initialize model
     print('use_checkpoint',args.use_checkpoint)

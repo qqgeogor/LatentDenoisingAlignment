@@ -228,3 +228,48 @@ python finetune_cifar_classifier_vit_hldae_tiny.py     \
     --mlflow_experiment_name jepa_vae_l1     \
     --run_name jepa_vae_l1_200epoch
 
+
+
+
+python finetune_cifar_classifier_vit_hldae_tiny.py     \
+    --pretrained_path ../../autodl-tmp/output_ijepa/checkpoint_epoch_100.pth     \
+    --img_size 128     \
+    --patch_size 16      \
+    --decoder_embed_dim 192     \
+    --decoder_num_heads 3     \
+    --mlflow_experiment_name ijepa     \
+    --run_name ijepa_100epoch
+
+
+
+
+python finetune_cifar_classifier_vit_hldae_tiny.py     \
+    --pretrained_path ../../autodl-tmp/output_ijepa_cdr/checkpoint_epoch_40.pth     \
+    --img_size 128     \
+    --patch_size 16      \
+    --decoder_embed_dim 192     \
+    --decoder_num_heads 3     \
+    --mlflow_experiment_name ijepa_cdr     \
+    --run_name ijepa_cdr_40epoch
+
+
+
+python finetune_cifar_classifier_vit_hldae_tiny.py     \
+    --pretrained_path ../../autodl-tmp/output_ijepa/checkpoint_epoch_20.pth     \
+    --img_size 128     \
+    --patch_size 16      \
+    --decoder_embed_dim 192     \
+    --decoder_num_heads 3     \
+    --mlflow_experiment_name ijepa     \
+    --run_name ijepa_20epoch
+
+
+
+python finetune_cifar_classifier_vit_hldae_tiny.py     \
+    --pretrained_path ../../autodl-tmp/output_ae_sigma_0_25_sqrt_noise_pred/checkpoint_epoch_200.pth     \
+    --img_size 128     \
+    --patch_size 16      \
+    --decoder_embed_dim 96     \
+    --decoder_num_heads 3     \
+    --mlflow_experiment_name ae_sigma_0_25_sqrt_noise_pred     \
+    --run_name ae_sigma_0_25_sqrt_noise_pred_200epoch

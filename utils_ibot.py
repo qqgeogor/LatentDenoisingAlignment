@@ -133,6 +133,121 @@ class EMAPatchPCANoise(nn.Module):
             return noisy_image
 
 
+
+class SpatialPatchPCANoise(nn.Module):
+    """Module for applying PCA-based noise to image patches."""
+    
+    def __init__(self, patch_size=4, noise_scale=0.5, kernel='linear', gamma=1.0):
+        super().__init__()
+        self.patch_size = patch_size
+        self.noise_scale = noise_scale
+        self.ema_cov = None
+
+    def inverse_transform(self, x_components):
+        B, N, C = x_components.shape
+        x_components = x_components.reshape(B*N, C)
+        return (x_components @ self.ema_eig_vecs.T).reshape(B, N, C)
+    
+    @torch.no_grad()
+    def forward(self, x, return_patches=False):
+        if not self.training:
+            return x
+
+        B, C, H, W = x.shape
+        p = self.patch_size
+        assert H % p == 0 and W % p == 0, "Image dimensions must be divisible by patch size"
+
+        # Extract patches (B, C, H, W) -> (B, num_patches, C*p*p)
+        x_patches = x.unfold(2, p, p).unfold(3, p, p)  # (B, C, H/p, W/p, p, p)
+        x_patches = x_patches.permute(0, 2, 3, 1, 4, 5)  # (B, H/p, W/p, C, p, p)
+        num_patches_h, num_patches_w = x_patches.size(1), x_patches.size(2)
+        x_patches = x_patches.reshape(B, num_patches_h * num_patches_w, C * p * p)
+
+        # # Flatten all patches across batch and spatial dimensions
+        all_patches = x_patches.reshape(-1, C*p*p)  # (B*num_patches_total, C*p*p)
+
+        # x_patches = x_patches.transpose(-2,-1)
+        # all_patches = x_patches.reshape(-1, num_patches_h * num_patches_w*C)
+
+        # Compute PCA components
+        with torch.no_grad():
+            mean = all_patches.mean(dim=0)
+            centered = all_patches - mean
+
+            n = centered.size(0)
+            u, s, v = torch.linalg.svd(centered, full_matrices=False)
+            eig_vals = (s**2)/(n-1 + 1e-6)
+            eig_vecs = v.T
+
+            idx = torch.argsort(eig_vals, descending=True)
+            eig_vals = eig_vals[idx]
+            eig_vecs = eig_vecs[:, idx]
+        
+            valid_components = torch.sum(eig_vals > 1e-6)
+            self.valid_components = valid_components
+            eig_vals = eig_vals[:valid_components]
+            eig_vecs = eig_vecs[:, :valid_components]
+            
+            self.ema_eig_vals = eig_vals
+            self.ema_eig_vecs = eig_vecs
+        
+        noise_coeff = torch.randn(all_patches.size(0), self.valid_components).to(all_patches.device)
+
+        ema_eig_vecs = self.ema_eig_vecs# @ R
+        
+        # # scaled_noise = noise_coeff * (self.ema_eig_vals.sqrt()).unsqueeze(0) * self.noise_scale
+        # # Calculate energy (sum of eigenvalues)
+        # total_energy = self.ema_eig_vals.sum()
+        
+        # # Calculate relative importance of each eigenvector based on its eigenvalue
+        # importance = self.ema_eig_vals / total_energy
+        
+        # # Apply softmax to get normalized weights that sum to 1
+        # # Using temperature parameter to control the distribution sharpness
+        # temperature = 0.1 # Higher temperature for smoother distribution
+        # softmax_weights = torch.nn.functional.softmax(importance / temperature, dim=0)
+        
+        # # Weight the noise coefficients by the softmax weights
+        # # This gives more emphasis to directions with higher variance
+        # weighted_noise_coeff = noise_coeff * softmax_weights.unsqueeze(0)
+        
+        # # Scale the weighted noise by the noise scale parameter
+        # scaled_noise = weighted_noise_coeff * (self.ema_eig_vals.sqrt()).unsqueeze(0) * self.noise_scale
+
+        # linear sample noise_scale from √2 to 0.
+        # Linear uniform sampling of noise_scale from √2 to 0
+        batch_size = all_patches.size(0)
+        # Create a linear distribution from √2 to 0
+        max_scale = 2**0.5  # √2
+        min_scale = 0
+        # Generate random values between 0 and 1, then scale to our range
+        random_scales = torch.rand(batch_size, 1, device=all_patches.device)
+        # Transform to range [min_scale, max_scale]
+        batch_noise_scales = max_scale - random_scales * (max_scale - min_scale)
+        # Apply the per-sample noise scale
+        scaled_noise = noise_coeff * (self.ema_eig_vals.sqrt()).unsqueeze(0) * batch_noise_scales
+
+        pca_noise = scaled_noise @ ema_eig_vecs.T
+        
+        
+        # # Reshape noise and add to original patches
+        pca_noise = pca_noise.reshape_as(x_patches)
+        noisy_patches = x_patches + pca_noise
+        
+        # Reconstruct noisy image from patches
+        noisy_patches = noisy_patches.reshape(B, num_patches_h, num_patches_w, C, p, p)
+        noisy_patches = noisy_patches.permute(0, 3, 1, 4, 2, 5)  # (B, C, H/p, p, W/p, p)
+        noisy_image = noisy_patches.reshape(B, C, H, W)
+
+        if return_patches:
+            pca_noise = pca_noise.reshape(B, num_patches_h, num_patches_w, C, p, p)
+            pca_noise = pca_noise.permute(0, 3, 1, 4, 2, 5)  # (B, C, H/p, p, W/p, p)
+            pca_noise = pca_noise.reshape(B, C, H, W)
+            return noisy_image, pca_noise
+        else:
+            return noisy_image
+
+
 class SVDPatchPCANoise(nn.Module):
     """Module for applying PCA-based noise to image patches."""
     
@@ -187,7 +302,7 @@ class SVDPatchPCANoise(nn.Module):
             self.ema_eig_vecs = eig_vecs
         
         noise_coeff = torch.randn(all_patches.size(0), self.valid_components).to(all_patches.device)
-        scaled_noise = noise_coeff * (self.ema_eig_vals.sqrt()).unsqueeze(0)
+        scaled_noise = noise_coeff * (self.ema_eig_vals.sqrt()).unsqueeze(0)*self.noise_scale
         pca_noise = scaled_noise @ self.ema_eig_vecs.T
 
         # Reshape noise and add to original patches
@@ -2090,3 +2205,26 @@ def rbf_preimage(z, anchors, gamma):
         x_solution = x_new
         
     return x_solution
+
+
+def generate_random_rotation_matrix(n, theta_max=0.1,theta_min=0.00):
+    """Generate a random rotation matrix with small angles.
+    Args:
+        n: dimension of the matrix
+        theta_max: maximum rotation angle in radians (default 0.1 ≈ 5.7 degrees)
+    """
+    # Generate random skew-symmetric matrix
+    random_state = torch.rand(n, n)
+    skew = random_state - random_state.t()
+    
+    # Randomly select a value between theta_min and theta_max
+    theta_range = theta_max - theta_min
+    random_theta = theta_min + theta_range * torch.randn(1).item()
+    # Scale the rotation to be small
+    skew = skew * (random_theta / torch.max(torch.abs(skew)))
+    
+    # Convert to rotation matrix using Cayley transform
+    I = torch.eye(n).to(skew.device)
+    R = (I - skew) @ torch.inverse(I + skew)
+    
+    return R

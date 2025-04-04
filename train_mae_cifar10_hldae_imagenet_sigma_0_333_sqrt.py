@@ -514,6 +514,9 @@ def get_args_parser():
                         help='Input image size')
     parser.add_argument('--patch_size', default=16, type=int,
                         help='Patch size for image tokenization')
+
+    
+
     parser.add_argument('--embed_dim', default=192, type=int,
                         help='Embedding dimension')
     parser.add_argument('--depth', default=12, type=int,

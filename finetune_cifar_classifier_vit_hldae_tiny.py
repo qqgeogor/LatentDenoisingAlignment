@@ -113,7 +113,10 @@ def finetune(args):
                      mlp_ratio=args.mlp_ratio, norm_layer=nn.LayerNorm, norm_pix_loss=False, use_checkpoint=False).to(device)
         if args.pretrained_path:
             checkpoint = torch.load(args.pretrained_path)
-            backbone.load_state_dict(checkpoint['model_state_dict'],strict=False)
+            if args.model_type == 'teacher':
+                backbone.load_state_dict(checkpoint['teacher_model_state_dict'],strict=False)
+            else:
+                backbone.load_state_dict(checkpoint['model_state_dict'],strict=False)
         
         # Create classifier
         model = CifarClassifier(backbone,freeze_backbone=args.freeze_backbone).to(device)
@@ -217,7 +220,9 @@ def get_args_parser():
     parser.add_argument('--decoder_depth', default=4, type=int)
     parser.add_argument('--decoder_num_heads', default=3, type=int)
     parser.add_argument('--mlp_ratio', default=4., type=float)
+    parser.add_argument('--model_type', default='student', type=str)
     
+
     # Add MLflow arguments
     parser.add_argument('--mlflow_tracking_uri', default='http://localhost:5000',
                       help='URI for MLflow tracking server')
