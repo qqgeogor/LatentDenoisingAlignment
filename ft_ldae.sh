@@ -273,3 +273,17 @@ python finetune_cifar_classifier_vit_hldae_tiny.py     \
     --decoder_num_heads 3     \
     --mlflow_experiment_name ae_sigma_0_25_sqrt_noise_pred     \
     --run_name ae_sigma_0_25_sqrt_noise_pred_200epoch
+
+
+
+
+python finetune_cifar_classifier_vit_hldae_tiny.py     \
+    --pretrained_path /mnt/d/repo/output_masked_ldae_75/checkpoint_epoch_40.pth     \
+    --img_size 128     \
+    --patch_size 16      \
+    --decoder_embed_dim 192     \
+    --decoder_num_heads 3     \
+    --mlflow_experiment_name masked_ldae_75     \
+    --run_name masked_ldae_75_40epoch
+
+
