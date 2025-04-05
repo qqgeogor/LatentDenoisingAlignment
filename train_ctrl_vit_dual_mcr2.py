@@ -17,7 +17,15 @@ os.environ['MPLBACKEND'] = 'Agg'
 import matplotlib
 matplotlib.use('Agg')
 
-from vit_ibot import MaskedAutoencoderViT
+from vit import MaskedAutoencoderViT
+
+
+
+def mcr2(Z1,Z2):
+    loss_expd = R(torch.cat([Z1,Z2],dim=0))
+    loss_comp = 0.5*R(Z1)+0.5*R(Z2)
+    total_loss = loss_expd - loss_comp
+    return total_loss,loss_expd,loss_comp
 
 def zero_centered_gradient_penalty(samples, critics):
     grad, = torch.autograd.grad(outputs=critics.sum(), inputs=samples, create_graph=True)
@@ -256,11 +264,16 @@ class GeneratorProjector(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             # Initial projection
-            nn.Linear(latent_dim, latent_dim * 8 * 8),
+            nn.Linear(latent_dim, latent_dim * 4 * 4),
             nn.LeakyReLU(0.2),
             
             # Reshape layer instead of lambda
-            Reshape((8*8,latent_dim)),
+            Reshape((latent_dim, 4, 4)),
+            
+            # [4x4] -> [8x8]
+            nn.ConvTranspose2d(latent_dim, latent_dim , 4, 2, 1),
+            nn.BatchNorm2d(latent_dim ),
+            nn.LeakyReLU(0.2),
         )
 
         self.apply(self._init_weights)
@@ -268,9 +281,14 @@ class GeneratorProjector(nn.Module):
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             nn.init.orthogonal_(m.weight)
-
+    
     def forward(self, z):
-        return self.net(z)
+        z_up = self.net(z)
+        b,c,h,w = z_up.shape
+        z_up = z_up.reshape(b,c,-1).transpose(-2,-1)
+        z_up = torch.cat([z.unsqueeze(1),z_up],dim=1)
+        
+        return z_up
 
 # Add Generator class
 class Generator(nn.Module):
@@ -322,6 +340,9 @@ def train_ebm_gan(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    # Initialize AMP scaler
+    scaler = GradScaler(enabled=args.use_amp)
+
     # Data preprocessing
     transform = transforms.Compose([
         transforms.RandomHorizontalFlip(),
@@ -344,7 +365,24 @@ def train_ebm_gan(args):
                            shuffle=True, num_workers=args.num_workers)
 
     # Initialize models
-    generator = Generator(latent_dim=192).to(device)
+    generator =  MaskedAutoencoderViT(
+        img_size=32,
+        patch_size=4,
+        in_chans=3,
+        embed_dim=192,
+        depth=0,
+        num_heads=3,
+        decoder_embed_dim=192,
+        decoder_depth=6,
+        decoder_num_heads=3,
+        mlp_ratio=4.,
+        norm_layer=nn.LayerNorm,
+        norm_pix_loss=False,
+        use_checkpoint=args.use_checkpoint
+    ).to(device)
+
+    generator_projector = GeneratorProjector(latent_dim=192).to(device)
+    
 
 
     # discriminator = ResNetEnergyNet(img_channels=3, hidden_dim=64).to(device)
@@ -361,12 +399,12 @@ def train_ebm_gan(args):
         mlp_ratio=4.,
         norm_layer=nn.LayerNorm,
         norm_pix_loss=False,
-        use_checkpoint=False
+        use_checkpoint=args.use_checkpoint
     ).to(device)
     
     # Optimizers
     g_optimizer = torch.optim.AdamW(
-        generator.parameters(), 
+        list(generator.parameters())+list(generator_projector.parameters()), 
         lr=args.g_lr, 
         betas=(args.g_beta1, args.g_beta2)
     )
@@ -414,88 +452,55 @@ def train_ebm_gan(args):
             real_samples = real_samples.to(device)
             
             # Train Discriminator
-            for _ in range(args.n_critic):  # Train discriminator more frequently
+            for _ in range(args.n_critic):
                 d_optimizer.zero_grad()
                 
-                # Generate fake samples
-                z = discriminator.forward_feature(real_samples.detach())[:,0]
+                with autocast(enabled=args.use_amp):
+                    # Generate fake samples
+                    z = discriminator.forward_feature(real_samples.detach())[:,0]
+                    z_up = generator_projector(z)
+                    fake_samples = generator.forward_decoder(z_up)
+                    fake_samples = generator.unpatchify(fake_samples).detach()
+                    
+                    # Compute energies
+                    z_real = discriminator.forward_feature(real_samples)[:,0]
+                    z_fake = discriminator.forward_feature(fake_samples)[:,0]
+                    
+                    d_mcr2, d_expd, d_comp = mcr2(z_real, z_fake)
+                    d_loss = -d_mcr2
 
-
-
-
-                real_samples = real_samples.detach().requires_grad_(True)
-                
-                
-                fake_samples = generator(z).detach().requires_grad_(True)
-
-                # Compute energies
-                z_real = discriminator.forward_feature(real_samples)[:,0]
-                real_energy = discriminator.discriminator_head(z_real)
-                z_fake = discriminator.forward_feature(fake_samples)[:,0]
-                fake_energy = discriminator.discriminator_head(z_fake)
-                
-                realistic_logits = real_energy - fake_energy
-                d_loss = F.softplus(-realistic_logits)
-
-                loss_tcr = -R(z_real).mean()
-                loss_tcr *=1e-2
-
-
-                # Improved EBM-GAN discriminator loss
-                # d_loss = (F.softplus(real_energy) + (-fake_energy))
-                
-                r1 = zero_centered_gradient_penalty(real_samples, real_energy)
-                r2 = zero_centered_gradient_penalty(fake_samples, fake_energy)
-
-                d_loss = d_loss + args.gp_weight/2 * (r1 + r2)
-                d_loss = d_loss.mean() + loss_tcr
-
-                # # Add gradient penalty
-                # gp = compute_gradient_penalty(discriminator, real_samples, fake_samples, device)
-                # d_loss = d_loss + args.gp_weight * gp
-                
-                d_loss.backward()
-                d_optimizer.step()
+                scaler.scale(d_loss).backward()
+                scaler.step(d_optimizer)
             
             # Train Generator
             g_optimizer.zero_grad()
             
-            # Generate new fake samples
-            z = discriminator.forward_feature(real_samples.detach())[:,0]
+            with autocast(enabled=args.use_amp):
+                # Generate new fake samples
+                z = discriminator.forward_feature(real_samples.detach())[:,0]
+                z_up = generator_projector(z)
+                fake_samples = generator.forward_decoder(z_up)
+                fake_samples = generator.unpatchify(fake_samples)
+                
+                z_fake = discriminator.forward_feature(fake_samples)[:,0]
+                z_real = discriminator.forward_feature(real_samples)[:,0]
+                
+                g_mcr2, g_expd, g_comp = mcr2(z_real, z_fake)
+                g_loss = g_mcr2
 
-            fake_samples = generator(z)
+            scaler.scale(g_loss).backward()
+            scaler.step(g_optimizer)
             
-            
-            
+            # Update scaler
+            scaler.update()
 
-            real_energy = discriminator.discriminator_head(z)
-            z_fake = discriminator.forward_feature(fake_samples)[:,0]
-
-            # loss_tcr = -R(z_fake).mean()
-            # loss_tcr *=1e-2
-            
-            
-            fake_energy = discriminator.discriminator_head(z_fake)
-            
-            realistic_logits = fake_energy - real_energy
-            g_loss = F.softplus(-realistic_logits)
-            g_loss = g_loss.mean()# + loss_tcr
-            
-            # Improved generator loss
-            # g_loss = (fake_energy).mean()
-            
-            g_loss.backward()
-            g_optimizer.step()
-            
             if i % args.log_freq == 0:
                 current_g_lr = g_optimizer.param_groups[0]['lr']
                 current_d_lr = d_optimizer.param_groups[0]['lr']
                 print(f'Epoch [{epoch}/{args.epochs}], Step [{i}/{len(trainloader)}], '
                       f'D_loss: {d_loss.item():.4f}, G_loss: {g_loss.item():.4f}, '
-                      f'r1: {r1.mean().item():.4f}, r2: {r2.mean().item():.4f}, '
-                      f'loss_tcr: {loss_tcr.item():.4f}, '
-                      f'Real Energy: {real_energy.mean().item():.4f}, '
-                      f'Fake Energy: {fake_energy.mean().item():.4f}, '
+                      f'D_expd: {d_expd.item():.4f}, D_comp: {d_comp.item():.4f}, '
+                      f'G_expd: {g_expd.item():.4f}, G_comp: {g_comp.item():.4f}, '
                       f'G_LR: {current_g_lr:.6f}, D_LR: {current_d_lr:.6f}'
                       )
         
@@ -504,7 +509,7 @@ def train_ebm_gan(args):
         d_scheduler.step()
         
         real_samples = next(iter(trainloader))[0].to(device)
-        save_gan_samples(generator, discriminator, epoch, args.output_dir, real_samples=real_samples)
+        save_gan_samples(generator, discriminator, generator_projector, epoch, args.output_dir, real_samples=real_samples)
     
         # Save samples and model checkpoints
         if epoch % args.save_freq == 0:
@@ -518,7 +523,7 @@ def train_ebm_gan(args):
                 'd_scheduler_state_dict': d_scheduler.state_dict(),
             }, os.path.join(args.output_dir, f'ebm_gan_checkpoint_{epoch}.pth'))
 
-def save_gan_samples(generator, discriminator, epoch, output_dir, n_samples=36,real_samples=None):
+def save_gan_samples(generator, discriminator, generator_projector, epoch, output_dir, n_samples=36,real_samples=None):
     generator.eval()
     discriminator.eval()
     real_samples = real_samples[:n_samples]
@@ -526,9 +531,9 @@ def save_gan_samples(generator, discriminator, epoch, output_dir, n_samples=36,r
     with torch.no_grad():
         
         z = discriminator.forward_feature(real_samples.detach())[:,0]
-
-        fake_samples = generator(z).detach().requires_grad_(True)
-        
+        z_up = generator_projector(z)
+        fake_samples = generator.forward_decoder(z_up)
+        fake_samples = generator.unpatchify(fake_samples)
         # Changed 'range' to 'value_range'
         grid = make_grid(fake_samples, nrow=6, normalize=True, value_range=(-1, 1))
         plt.figure(figsize=(10, 10))
@@ -590,6 +595,7 @@ def get_args_parser():
     parser.add_argument('--cls', default=-1, type=int,
                         help='Class to train on')
     
+    parser.add_argument('--use_checkpoint', action='store_true')
     # Existing parameters
     parser.add_argument('--epochs', default=1200, type=int)
     parser.add_argument('--batch_size', default=128, type=int)

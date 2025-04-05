@@ -256,11 +256,16 @@ class GeneratorProjector(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             # Initial projection
-            nn.Linear(latent_dim, latent_dim * 8 * 8),
+            nn.Linear(latent_dim, latent_dim * 4 * 4),
             nn.LeakyReLU(0.2),
             
             # Reshape layer instead of lambda
-            Reshape((8*8,latent_dim)),
+            Reshape((latent_dim, 4, 4)),
+            
+            # [4x4] -> [8x8]
+            nn.ConvTranspose2d(latent_dim, latent_dim , 4, 2, 1),
+            nn.BatchNorm2d(latent_dim ),
+            nn.LeakyReLU(0.2),
         )
 
         self.apply(self._init_weights)
@@ -268,9 +273,14 @@ class GeneratorProjector(nn.Module):
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             nn.init.orthogonal_(m.weight)
-
+    
     def forward(self, z):
-        return self.net(z)
+        z_up = self.net(z)
+        b,c,h,w = z_up.shape
+        z_up = z_up.reshape(b,c,-1).transpose(-2,-1)
+        z_up = torch.cat([z.unsqueeze(1),z_up],dim=1)
+        
+        return z_up
 
 # Add Generator class
 class Generator(nn.Module):
@@ -344,7 +354,24 @@ def train_ebm_gan(args):
                            shuffle=True, num_workers=args.num_workers)
 
     # Initialize models
-    generator = Generator(latent_dim=192).to(device)
+    generator =  MaskedAutoencoderViT(
+        img_size=32,
+        patch_size=4,
+        in_chans=3,
+        embed_dim=192,
+        depth=0,
+        num_heads=3,
+        decoder_embed_dim=192,
+        decoder_depth=6,
+        decoder_num_heads=3,
+        mlp_ratio=4.,
+        norm_layer=nn.LayerNorm,
+        norm_pix_loss=False,
+        use_checkpoint=False
+    ).to(device)
+
+    generator_projector = GeneratorProjector(latent_dim=192).to(device)
+    
 
 
     # discriminator = ResNetEnergyNet(img_channels=3, hidden_dim=64).to(device)
@@ -366,7 +393,7 @@ def train_ebm_gan(args):
     
     # Optimizers
     g_optimizer = torch.optim.AdamW(
-        generator.parameters(), 
+        list(generator.parameters())+list(generator_projector.parameters()), 
         lr=args.g_lr, 
         betas=(args.g_beta1, args.g_beta2)
     )
@@ -419,15 +446,15 @@ def train_ebm_gan(args):
                 
                 # Generate fake samples
                 z = discriminator.forward_feature(real_samples.detach())[:,0]
-
+                z_up = generator_projector(z)
 
 
 
                 real_samples = real_samples.detach().requires_grad_(True)
                 
                 
-                fake_samples = generator(z).detach().requires_grad_(True)
-
+                fake_samples = generator.forward_decoder(z_up)
+                fake_samples = generator.unpatchify(fake_samples).detach().requires_grad_(True)
                 # Compute energies
                 z_real = discriminator.forward_feature(real_samples)[:,0]
                 real_energy = discriminator.discriminator_head(z_real)
@@ -462,9 +489,9 @@ def train_ebm_gan(args):
             
             # Generate new fake samples
             z = discriminator.forward_feature(real_samples.detach())[:,0]
-
-            fake_samples = generator(z)
-            
+            z_up = generator_projector(z)
+            fake_samples = generator.forward_decoder(z_up)
+            fake_samples = generator.unpatchify(fake_samples)
             
             
 
@@ -504,7 +531,7 @@ def train_ebm_gan(args):
         d_scheduler.step()
         
         real_samples = next(iter(trainloader))[0].to(device)
-        save_gan_samples(generator, discriminator, epoch, args.output_dir, real_samples=real_samples)
+        save_gan_samples(generator, discriminator, generator_projector, epoch, args.output_dir, real_samples=real_samples)
     
         # Save samples and model checkpoints
         if epoch % args.save_freq == 0:
@@ -518,7 +545,7 @@ def train_ebm_gan(args):
                 'd_scheduler_state_dict': d_scheduler.state_dict(),
             }, os.path.join(args.output_dir, f'ebm_gan_checkpoint_{epoch}.pth'))
 
-def save_gan_samples(generator, discriminator, epoch, output_dir, n_samples=36,real_samples=None):
+def save_gan_samples(generator, discriminator, generator_projector, epoch, output_dir, n_samples=36,real_samples=None):
     generator.eval()
     discriminator.eval()
     real_samples = real_samples[:n_samples]
@@ -526,9 +553,9 @@ def save_gan_samples(generator, discriminator, epoch, output_dir, n_samples=36,r
     with torch.no_grad():
         
         z = discriminator.forward_feature(real_samples.detach())[:,0]
-
-        fake_samples = generator(z).detach().requires_grad_(True)
-        
+        z_up = generator_projector(z)
+        fake_samples = generator.forward_decoder(z_up)
+        fake_samples = generator.unpatchify(fake_samples)
         # Changed 'range' to 'value_range'
         grid = make_grid(fake_samples, nrow=6, normalize=True, value_range=(-1, 1))
         plt.figure(figsize=(10, 10))

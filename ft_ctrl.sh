@@ -11,3 +11,10 @@ python finetune_ctrl.py     \
 #     --img_size 32 \
 #     --use_amp \
 #     --freeze_backbone 
+
+
+
+python finetune_ctrl.py     \
+    --pretrained_path ../../autodl-tmp/output_ctrl_mcr2/ebm_gan_checkpoint_100.pth     \
+    --img_size 32 \
+    --use_amp 

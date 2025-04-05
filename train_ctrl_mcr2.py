@@ -17,8 +17,14 @@ os.environ['MPLBACKEND'] = 'Agg'
 import matplotlib
 matplotlib.use('Agg')
 
-from vit_ibot import MaskedAutoencoderViT
 
+
+def mcr2(Z1,Z2):
+    loss_expd = R(torch.cat([Z1,Z2],dim=0))
+    loss_comp = 0.5*R(Z1)+0.5*R(Z2)
+    total_loss = loss_expd - loss_comp
+    return total_loss,loss_expd,loss_comp
+    
 def zero_centered_gradient_penalty(samples, critics):
     grad, = torch.autograd.grad(outputs=critics.sum(), inputs=samples, create_graph=True)
     return grad.square().sum([1, 2, 3])
@@ -127,9 +133,6 @@ def R_nonorm(Z,eps=0.5):
 
     out = 0.5*torch.logdet(cov)
     return out.mean()
-
-def mcr(Z1,Z2):
-    return R(torch.cat([Z1,Z2],dim=0))-0.5*R(Z1)-0.5*R(Z2)
 
 
 
@@ -246,36 +249,17 @@ class Reshape(nn.Module):
     def forward(self, x):
         return x.view(x.size(0), *self.shape)
 
-
-
-
-
-# Add Generator class
-class GeneratorProjector(nn.Module):
-    def __init__(self, latent_dim=100,):
-        super().__init__()
-        self.net = nn.Sequential(
-            # Initial projection
-            nn.Linear(latent_dim, latent_dim * 8 * 8),
-            nn.LeakyReLU(0.2),
-            
-            # Reshape layer instead of lambda
-            Reshape((8*8,latent_dim)),
-        )
-
-        self.apply(self._init_weights)
-    
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            nn.init.orthogonal_(m.weight)
-
-    def forward(self, z):
-        return self.net(z)
-
 # Add Generator class
 class Generator(nn.Module):
     def __init__(self, latent_dim=100, hidden_dim=64):
         super().__init__()
+
+                
+        # Variational part
+        self.fc_mu = nn.Linear(latent_dim, latent_dim)
+        self.fc_logvar = nn.Linear(latent_dim, latent_dim)
+
+
         self.net = nn.Sequential(
             # Initial projection
             nn.Linear(latent_dim, hidden_dim * 8 * 4 * 4),
@@ -311,11 +295,176 @@ class Generator(nn.Module):
             nn.init.orthogonal_(m.weight)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
-                
-    def forward(self, z):
+    
         
+    def kl_divergence(self, mu, logvar):
+        # KL divergence between N(mu, sigma) and N(0, 1)
+        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
+    
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+        return z
+    
 
-        return self.net(z)
+    def forward(self, z,use_vae=False):
+        if use_vae:
+                
+            mu = self.fc_mu(z)
+            logvar = self.fc_logvar(z)
+            z = self.reparameterize(mu,logvar)
+            kld = self.kl_divergence(mu,logvar).mean()
+            return self.net(z),kld
+        else:
+            return self.net(z),None
+
+
+    # def forward(self, z):
+    #     mu = self.fc_mu(z)
+    #     logvar = self.fc_logvar(z)
+    #     z = self.reparameterize(mu,logvar)
+    #     kld = self.kl_divergence(mu,logvar).mean()
+    #     return self.net(z),kld
+
+
+class ResBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1, up=False):
+        super().__init__()
+        
+        self.up = up
+        if self.up:
+            self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
+        
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, stride=1, padding=1)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, stride=1, padding=1)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        
+        # Shortcut connection
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels or up:
+            shortcut_layers = []
+            if up:
+                shortcut_layers.append(nn.Upsample(scale_factor=2, mode='nearest'))
+            shortcut_layers.extend([
+                nn.Conv2d(in_channels, out_channels, 1, stride=1),
+                nn.BatchNorm2d(out_channels)
+            ])
+            self.shortcut = nn.Sequential(*shortcut_layers)
+            
+    def forward(self, x):
+        if self.up:
+            x = self.upsample(x)
+            
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = F.relu(out)
+        
+        out = self.conv2(out)
+        out = self.bn2(out)
+        
+        out += self.shortcut(x)
+        out = F.relu(out)
+        return out
+
+class ResBlockDown(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, stride=2, padding=1)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, stride=1, padding=1)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        
+        # Shortcut with downsampling
+        self.shortcut = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 1, stride=2),
+            nn.BatchNorm2d(out_channels)
+        )
+    
+    def forward(self, x):
+        # Main path
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = F.relu(out)
+        
+        out = self.conv2(out)
+        out = self.bn2(out)
+        
+        # Shortcut path
+        shortcut = self.shortcut(x)
+        
+        # Combine paths
+        out += shortcut
+        out = F.relu(out)
+        return out
+
+# Now let's update the Encoder and Decoder with these specific ResBlock implementations:
+
+class Encoder(nn.Module):
+    def __init__(self, img_channels=3):
+        super().__init__()
+        
+        # Initial ResBlock down with 128 channels
+        self.resblock1 = ResBlockDown(img_channels, 128)  # 32x32 -> 16x16
+        self.resblock2 = ResBlockDown(128, 128)          # 16x16 -> 8x8
+        
+        # Regular ResBlocks with 128 channels
+        self.resblock3 = ResBlock(128, 128)              # 8x8
+        self.resblock4 = ResBlock(128, 128)              # 8x8
+        
+        # ReLU activation
+        self.relu = nn.ReLU()
+        
+        # Global sum pooling
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        
+        # Final dense layer to 128-dim latent space
+        self.dense = nn.Linear(128, 128)
+        
+    def forward(self, x):
+        x = self.resblock1(x)
+        x = self.resblock2(x)
+        x = self.resblock3(x)
+        x = self.resblock4(x)
+        x = self.relu(x)
+        x = self.global_pool(x)
+        x = x.view(x.size(0), -1)
+        x = self.dense(x)
+        return x
+
+class Decoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        
+        # Initial dense layer from 128-dim latent to 4x4x256
+        self.dense = nn.Linear(128, 4 * 4 * 256)
+        self.reshape = Reshape((256, 4, 4))
+        
+        # Three ResBlocks with 256 channels
+        self.resblock1 = ResBlock(256, 256)
+        self.resblock2 = ResBlock(256, 256)
+        self.resblock3 = ResBlock(256, 256)
+        
+        # Final layers: BatchNorm, ReLU, 3x3 conv, Tanh
+        self.bn = nn.BatchNorm2d(256)
+        self.relu = nn.ReLU()
+        self.final_conv = nn.Conv2d(256, 3, kernel_size=3, padding=1)
+        self.tanh = nn.Tanh()
+        
+    def forward(self, z):
+        x = self.dense(z)
+        x = self.reshape(x)
+        x = self.resblock1(x)
+        x = self.resblock2(x)
+        x = self.resblock3(x)
+        x = self.bn(x)
+        x = self.relu(x)
+        x = self.final_conv(x)
+        x = self.tanh(x)
+        return x,None
+    
 
 # Modify training function
 def train_ebm_gan(args):
@@ -344,25 +493,9 @@ def train_ebm_gan(args):
                            shuffle=True, num_workers=args.num_workers)
 
     # Initialize models
-    generator = Generator(latent_dim=192).to(device)
-
-
+    generator = Generator(latent_dim=args.latent_dim, hidden_dim=64).to(device)
     # discriminator = ResNetEnergyNet(img_channels=3, hidden_dim=64).to(device)
-    discriminator = MaskedAutoencoderViT(
-        img_size=32,
-        patch_size=4,
-        in_chans=3,
-        embed_dim=192,
-        depth=6,
-        num_heads=3,
-        decoder_embed_dim=192,
-        decoder_depth=0,
-        decoder_num_heads=3,
-        mlp_ratio=4.,
-        norm_layer=nn.LayerNorm,
-        norm_pix_loss=False,
-        use_checkpoint=False
-    ).to(device)
+    discriminator = EnergyNet(img_channels=3, hidden_dim=64).to(device)
     
     # Optimizers
     g_optimizer = torch.optim.AdamW(
@@ -418,37 +551,41 @@ def train_ebm_gan(args):
                 d_optimizer.zero_grad()
                 
                 # Generate fake samples
-                z = discriminator.forward_feature(real_samples.detach())[:,0]
+                z = discriminator.net(real_samples.detach()).squeeze()
 
+                real_samples = real_samples#.detach().requires_grad_(True)
+                fake_samples,loss_kld = generator(z,use_vae=False)
+                fake_samples = fake_samples.detach()#.requires_grad_(True)
 
+                z_real = discriminator.net(real_samples).squeeze()
+                # real_energy = discriminator.head(z_real)
+                z_fake = discriminator.net(fake_samples).squeeze()
+                # fake_energy = discriminator.head(z_fake)
 
-
-                real_samples = real_samples.detach().requires_grad_(True)
+                # loss_cos1 = 1 - F.cosine_similarity(z_real.detach(),z_fake,dim=-1).mean()
+                # loss_cos2 = 1 - F.cosine_similarity(z_real,z_fake.detach(),dim=-1).mean()
                 
+                # loss_cos = loss_cos1 + loss_cos2
+                # loss_cos /=2
+
+                # realistic_logits = real_energy - fake_energy
+                # d_loss = F.softplus(-realistic_logits)
+
+                # loss_tcr = -R(z).mean()
+                # loss_tcr *=1e-2
+
+
+                # # Improved EBM-GAN discriminator loss
+                # # d_loss = (F.softplus(real_energy) + (-fake_energy))
                 
-                fake_samples = generator(z).detach().requires_grad_(True)
+                # r1 = zero_centered_gradient_penalty(real_samples, real_energy)
+                # r2 = zero_centered_gradient_penalty(fake_samples, fake_energy)
 
-                # Compute energies
-                z_real = discriminator.forward_feature(real_samples)[:,0]
-                real_energy = discriminator.discriminator_head(z_real)
-                z_fake = discriminator.forward_feature(fake_samples)[:,0]
-                fake_energy = discriminator.discriminator_head(z_fake)
-                
-                realistic_logits = real_energy - fake_energy
-                d_loss = F.softplus(-realistic_logits)
+                # d_loss = d_loss + args.gp_weight/2 * (r1 + r2)
+                # d_loss = d_loss.mean() + loss_tcr + loss_cos
 
-                loss_tcr = -R(z_real).mean()
-                loss_tcr *=1e-2
-
-
-                # Improved EBM-GAN discriminator loss
-                # d_loss = (F.softplus(real_energy) + (-fake_energy))
-                
-                r1 = zero_centered_gradient_penalty(real_samples, real_energy)
-                r2 = zero_centered_gradient_penalty(fake_samples, fake_energy)
-
-                d_loss = d_loss + args.gp_weight/2 * (r1 + r2)
-                d_loss = d_loss.mean() + loss_tcr
+                d_mcr2,d_expd,d_comp = mcr2(z_real,z_fake)
+                d_loss = -d_mcr2
 
                 # # Add gradient penalty
                 # gp = compute_gradient_penalty(discriminator, real_samples, fake_samples, device)
@@ -461,28 +598,14 @@ def train_ebm_gan(args):
             g_optimizer.zero_grad()
             
             # Generate new fake samples
-            z = discriminator.forward_feature(real_samples.detach())[:,0]
+            z = discriminator.net(real_samples.detach()).squeeze()
 
-            fake_samples = generator(z)
-            
-            
-            
+            fake_samples,_ = generator(z,use_vae=False)
 
-            real_energy = discriminator.discriminator_head(z)
-            z_fake = discriminator.forward_feature(fake_samples)[:,0]
-
-            # loss_tcr = -R(z_fake).mean()
-            # loss_tcr *=1e-2
-            
-            
-            fake_energy = discriminator.discriminator_head(z_fake)
-            
-            realistic_logits = fake_energy - real_energy
-            g_loss = F.softplus(-realistic_logits)
-            g_loss = g_loss.mean()# + loss_tcr
-            
-            # Improved generator loss
-            # g_loss = (fake_energy).mean()
+            z_real = discriminator.net(real_samples).squeeze()  
+            z_fake = discriminator.net(fake_samples).squeeze()
+            g_mcr2,g_expd,g_comp = mcr2(z_real,z_fake)
+            g_loss = g_mcr2
             
             g_loss.backward()
             g_optimizer.step()
@@ -492,10 +615,8 @@ def train_ebm_gan(args):
                 current_d_lr = d_optimizer.param_groups[0]['lr']
                 print(f'Epoch [{epoch}/{args.epochs}], Step [{i}/{len(trainloader)}], '
                       f'D_loss: {d_loss.item():.4f}, G_loss: {g_loss.item():.4f}, '
-                      f'r1: {r1.mean().item():.4f}, r2: {r2.mean().item():.4f}, '
-                      f'loss_tcr: {loss_tcr.item():.4f}, '
-                      f'Real Energy: {real_energy.mean().item():.4f}, '
-                      f'Fake Energy: {fake_energy.mean().item():.4f}, '
+                      f'D_expd: {d_expd.item():.4f}, D_comp: {d_comp.item():.4f}, '
+                      f'G_expd: {g_expd.item():.4f}, G_comp: {g_comp.item():.4f}, '
                       f'G_LR: {current_g_lr:.6f}, D_LR: {current_d_lr:.6f}'
                       )
         
@@ -504,7 +625,7 @@ def train_ebm_gan(args):
         d_scheduler.step()
         
         real_samples = next(iter(trainloader))[0].to(device)
-        save_gan_samples(generator, discriminator, epoch, args.output_dir, real_samples=real_samples)
+        save_gan_samples(generator, discriminator, epoch, args.output_dir, device,real_samples=real_samples)
     
         # Save samples and model checkpoints
         if epoch % args.save_freq == 0:
@@ -518,16 +639,16 @@ def train_ebm_gan(args):
                 'd_scheduler_state_dict': d_scheduler.state_dict(),
             }, os.path.join(args.output_dir, f'ebm_gan_checkpoint_{epoch}.pth'))
 
-def save_gan_samples(generator, discriminator, epoch, output_dir, n_samples=36,real_samples=None):
+def save_gan_samples(generator, discriminator, epoch, output_dir, device, n_samples=36,real_samples=None):
     generator.eval()
     discriminator.eval()
     real_samples = real_samples[:n_samples]
     batch_size = real_samples.size(0)
     with torch.no_grad():
         
-        z = discriminator.forward_feature(real_samples.detach())[:,0]
+        z = discriminator.net(real_samples.detach()).squeeze()
 
-        fake_samples = generator(z).detach().requires_grad_(True)
+        fake_samples,loss_kld = generator(z)
         
         # Changed 'range' to 'value_range'
         grid = make_grid(fake_samples, nrow=6, normalize=True, value_range=(-1, 1))
