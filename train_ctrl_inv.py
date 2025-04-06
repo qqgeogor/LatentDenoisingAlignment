@@ -22,7 +22,7 @@ def zero_centered_gradient_penalty(samples, critics):
     return grad.square().sum([1, 2, 3])
 
 class EnergyNet(nn.Module):
-    def __init__(self, img_channels=3, hidden_dim=64,latent_dim=128):
+    def __init__(self, img_channels=3, hidden_dim=64):
         super().__init__()
         
         self.net = nn.Sequential(
@@ -47,10 +47,10 @@ class EnergyNet(nn.Module):
             nn.LeakyReLU(0.2),
             
             # Final conv to scalar energy: [B, 512, 2, 2] -> [B, 1, 1, 1]
-            nn.Conv2d(hidden_dim * 8, latent_dim, 2, 1, 0)
+            nn.Conv2d(hidden_dim * 8, 128, 2, 1, 0)
         )
-        
-        self.head = nn.Linear(latent_dim, 1)
+
+        self.head = nn.Linear(128, 1)
         
         # Initialize weights properly
         self.apply(self._init_weights)
@@ -293,6 +293,9 @@ class Generator(nn.Module):
 def train_ebm_gan(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    
+    # Initialize GradScaler for AMP
+    scaler = GradScaler()
 
     # Data preprocessing
     transform = transforms.Compose([
@@ -370,62 +373,66 @@ def train_ebm_gan(args):
             real_samples = real_samples.to(device)
             
             # Train Discriminator
-            for _ in range(args.n_critic):  # Train discriminator more frequently
+            for _ in range(args.n_critic):
                 d_optimizer.zero_grad()
                 
-                # Generate fake samples
-                z = discriminator.net(real_samples.detach()).squeeze()
+                with autocast():
+                    # Generate fake samples
+                    z = discriminator.net(real_samples.detach()).squeeze()
 
-                real_samples = real_samples.detach().requires_grad_(True)
-                fake_samples = generator(z).detach().requires_grad_(True)
-                
+                    real_samples = real_samples.detach().requires_grad_(True)
+                    fake_samples = generator(z).detach().requires_grad_(True)
 
-                # Compute energies
-                real_energy = discriminator(real_samples)
-                fake_energy = discriminator(fake_samples)
-                
-                realistic_logits = real_energy - fake_energy
-                d_loss = F.softplus(-realistic_logits)
+                    # Compute energies
+                    # real_energy = discriminator(real_samples)
+                    # fake_energy = discriminator(fake_samples)
+                    z_fake = discriminator.net(fake_samples).squeeze()
+                    fake_energy = discriminator.head(z_fake)
 
-                loss_tcr = -R(z).mean()
-                loss_tcr *=1e-2
+                    z_real = discriminator.net(real_samples).squeeze()
+                    real_energy = discriminator.head(z_real)
+                    
+                    realistic_logits = real_energy - fake_energy
+                    d_loss = F.softplus(-realistic_logits)
+
+                    d_loss_tcr = -R(z_real).mean()
+                    d_loss_tcr *= 1e-2
+
+                    r1 = zero_centered_gradient_penalty(real_samples, real_energy)
+                    r2 = zero_centered_gradient_penalty(fake_samples, fake_energy)
 
 
-                # Improved EBM-GAN discriminator loss
-                # d_loss = (F.softplus(real_energy) + (-fake_energy))
-                
-                r1 = zero_centered_gradient_penalty(real_samples, real_energy)
-                r2 = zero_centered_gradient_penalty(fake_samples, fake_energy)
+                    d_loss = d_loss + args.gp_weight/2 * (r1 + r2)
+                    d_loss = d_loss.mean() + d_loss_tcr
 
-                d_loss = d_loss + args.gp_weight/2 * (r1 + r2)
-                d_loss = d_loss.mean() + loss_tcr
-
-                # # Add gradient penalty
-                # gp = compute_gradient_penalty(discriminator, real_samples, fake_samples, device)
-                # d_loss = d_loss + args.gp_weight * gp
-                
-                d_loss.backward()
-                d_optimizer.step()
+                scaler.scale(d_loss).backward()
+                scaler.step(d_optimizer)
             
             # Train Generator
             g_optimizer.zero_grad()
             
-            # Generate new fake samples
-            z = discriminator.net(real_samples.detach()).squeeze()
+            with autocast():
+                # Generate new fake samples
+                z = discriminator.net(real_samples).squeeze()
+                fake_samples = generator(z)
+                # fake_energy = discriminator(fake_samples)
+                z_fake = discriminator.net(fake_samples).squeeze()
+                fake_energy = discriminator.head(z_fake)
+                real_energy = discriminator(real_samples)
 
-            fake_samples = generator(z)
-            fake_energy = discriminator(fake_samples)
-            real_energy = discriminator(real_samples)
 
-            realistic_logits = fake_energy - real_energy
-            g_loss = F.softplus(-realistic_logits)
-            g_loss = g_loss.mean()
+                g_loss_tcr = -R(z_fake).mean()
+                g_loss_tcr *= 1e-2
+
+
+                realistic_logits = fake_energy - real_energy
+                g_loss = F.softplus(-realistic_logits)
+                g_loss = g_loss.mean() #+ g_loss_tcr
             
-            # Improved generator loss
-            # g_loss = (fake_energy).mean()
+            scaler.scale(g_loss).backward()
+            scaler.step(g_optimizer)
             
-            g_loss.backward()
-            g_optimizer.step()
+            scaler.update()
             
             if i % args.log_freq == 0:
                 current_g_lr = g_optimizer.param_groups[0]['lr']
@@ -433,7 +440,8 @@ def train_ebm_gan(args):
                 print(f'Epoch [{epoch}/{args.epochs}], Step [{i}/{len(trainloader)}], '
                       f'D_loss: {d_loss.item():.4f}, G_loss: {g_loss.item():.4f}, '
                       f'r1: {r1.mean().item():.4f}, r2: {r2.mean().item():.4f}, '
-                      f'loss_tcr: {loss_tcr.item():.4f}, '
+                      f'd_loss_tcr: {d_loss_tcr.item():.4f}, '
+                      f'g_loss_tcr: {g_loss_tcr.item():.4f}, '
                       f'Real Energy: {real_energy.mean().item():.4f}, '
                       f'Fake Energy: {fake_energy.mean().item():.4f}, '
                       f'G_LR: {current_g_lr:.6f}, D_LR: {current_d_lr:.6f}'
