@@ -16,7 +16,7 @@ import torch.nn.functional as F
 os.environ['MPLBACKEND'] = 'Agg'
 import matplotlib
 matplotlib.use('Agg')
-
+from contextlib import nullcontext
 
 
 def mcr2(Z1,Z2):
@@ -414,8 +414,8 @@ class Encoder(nn.Module):
         
         # Final dense layer to 128-dim latent space
         self.dense = nn.Linear(128, 128)
-        
-    def forward(self, x):
+    
+    def net(self, x):
         x = self.resblock1(x)
         x = self.resblock2(x)
         x = self.resblock3(x)
@@ -425,6 +425,9 @@ class Encoder(nn.Module):
         x = x.view(x.size(0), -1)
         x = self.dense(x)
         return x
+    
+    def forward(self, x):
+        return self.net(x)
     
 
 
@@ -515,7 +518,7 @@ def train_ebm_gan(args):
                 d_optimizer.zero_grad()
                 
                 # Use autocast for mixed precision training
-                with autocast(enabled=args.use_amp):
+                with autocast(enabled=args.use_amp) if args.use_amp else nullcontext():
                     z = discriminator(real_samples.detach()).squeeze()
                     fake_samples = generator(z)
                     fake_samples = fake_samples.detach()
@@ -526,15 +529,19 @@ def train_ebm_gan(args):
                     d_mcr2, d_expd, d_comp = mcr2(z_real, z_fake)
                     d_loss = -d_mcr2
 
-                # Scale loss and backward pass
-                scaler.scale(d_loss).backward()
-                scaler.step(d_optimizer)
+                if args.use_amp:    
+                    scaler.scale(d_loss).backward()
+                    scaler.step(d_optimizer)
+                    scaler.update()
+                else:
+                    d_loss.backward()
+                    d_optimizer.step()
             
             # Train Generator
             g_optimizer.zero_grad()
             
             # Use autocast for mixed precision training
-            with autocast(enabled=args.use_amp):
+            with autocast(enabled=args.use_amp) if args.use_amp else nullcontext()  :
                 z = discriminator(real_samples.detach()).squeeze()
                 fake_samples = generator(z)
 
@@ -543,12 +550,15 @@ def train_ebm_gan(args):
                 g_mcr2, g_expd, g_comp = mcr2(z_real, z_fake)
                 g_loss = g_mcr2
             
-            # Scale loss and backward pass
-            scaler.scale(g_loss).backward()
-            scaler.step(g_optimizer)
+            if args.use_amp:
+                # Scale loss and backward pass
+                scaler.scale(g_loss).backward()
+                scaler.step(g_optimizer)
+                scaler.update()
+            else:
+                g_loss.backward()
+                g_optimizer.step()
             
-            # Update scaler
-            scaler.update()
             
             if i % args.log_freq == 0:
                 current_g_lr = g_optimizer.param_groups[0]['lr']
@@ -651,6 +661,7 @@ def get_args_parser():
     parser.add_argument('--cls', default=-1, type=int,
                         help='Class to train on')
     
+    parser.add_argument('--use_amp', action='store_true')
     # Existing parameters
     parser.add_argument('--epochs', default=1200, type=int)
     parser.add_argument('--batch_size', default=128, type=int)
@@ -659,7 +670,6 @@ def get_args_parser():
     parser.add_argument('--data_path', default='c:/datasets', type=str)
     parser.add_argument('--output_dir', default='/mnt/d/repo/output/cifar10-ebm-gan-r3gan-ctrl')
     parser.add_argument('--num_workers', default=4, type=int)
-    parser.add_argument('--use_amp', action='store_true')
     parser.add_argument('--log_freq', default=100, type=int)
     parser.add_argument('--save_freq', default=1, type=int)
     

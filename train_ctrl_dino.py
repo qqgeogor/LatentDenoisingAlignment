@@ -304,11 +304,11 @@ class Generator(nn.Module):
     
 
     def forward(self, z):
-        mu = self.fc_mu(z)
-        logvar = self.fc_logvar(z)
-        z = self.reparameterize(mu,logvar)
-        kld = self.kl_divergence(mu,logvar).mean()
-        return self.net(z),kld
+        # mu = self.fc_mu(z)
+        # logvar = self.fc_logvar(z)
+        # z = self.reparameterize(mu,logvar)
+        # kld = self.kl_divergence(mu,logvar).mean()
+        return self.net(z),None
 
 # Modify training function
 def train_ebm_gan(args):
@@ -441,13 +441,13 @@ def train_ebm_gan(args):
             # Generate new fake samples
             z = discriminator.net(real_samples.detach()).squeeze()
 
-            fake_samples,loss_kld = generator(z)
+            fake_samples,_ = generator(z)
             fake_energy = discriminator(fake_samples)
             real_energy = discriminator(real_samples)
 
             realistic_logits = fake_energy - real_energy
             g_loss = F.softplus(-realistic_logits)
-            g_loss = g_loss.mean() + loss_kld
+            g_loss = g_loss.mean()
             
             # Improved generator loss
             # g_loss = (fake_energy).mean()
@@ -463,7 +463,6 @@ def train_ebm_gan(args):
                       f'r1: {r1.mean().item():.4f}, r2: {r2.mean().item():.4f}, '
                       f'loss_tcr: {loss_tcr.item():.4f}, '
                       f'loss_cos: {loss_cos.item():.4f}, '
-                      f'loss_kld: {loss_kld.item():.4f}, '
                       f'Real Energy: {real_energy.mean().item():.4f}, '
                       f'Fake Energy: {fake_energy.mean().item():.4f}, '
                       f'G_LR: {current_g_lr:.6f}, D_LR: {current_d_lr:.6f}'
