@@ -343,6 +343,65 @@ class SVDPatchPCANoise(nn.Module):
 
 
 
+class SVDPCANoise(nn.Module):
+    """Module for applying PCA-based noise to image patches."""
+    
+    def __init__(self,noise_scale=0.5, kernel='linear', gamma=1.0):
+        super().__init__()
+
+        self.noise_scale = noise_scale
+        self.ema_cov = None
+
+    def inverse_transform(self, x_components):
+        B, N, C = x_components.shape
+        x_components = x_components.reshape(B*N, C)
+        return (x_components @ self.ema_eig_vecs.T).reshape(B, N, C)
+
+    def forward(self, x, return_patches=False):
+        if not self.training:
+            return x
+
+        B, C = x.shape
+
+        # Flatten all patches across batch and spatial dimensions
+        all_patches = x  # (B*num_patches_total, C*p*p)
+        
+        # Compute PCA components
+        with torch.no_grad():
+            mean = all_patches.mean(dim=0)
+            centered = all_patches - mean
+
+            n = centered.size(0)
+            u, s, v = torch.linalg.svd(centered, full_matrices=False)
+            eig_vals = (s**2)/(n-1 + 1e-6)
+            eig_vecs = v.T
+
+            idx = torch.argsort(eig_vals, descending=True)
+            eig_vals = eig_vals[idx]
+            eig_vecs = eig_vecs[:, idx]
+
+            valid_components = torch.sum(eig_vals > 1e-6)
+            self.valid_components = valid_components
+            eig_vals = eig_vals[:valid_components]
+            eig_vecs = eig_vecs[:, :valid_components]
+            
+            self.ema_eig_vals = eig_vals
+            self.ema_eig_vecs = eig_vecs
+        
+        noise_coeff = torch.randn(all_patches.size(0), self.valid_components).to(all_patches.device)
+        scaled_noise = noise_coeff * (self.ema_eig_vals.sqrt()).unsqueeze(0)*self.noise_scale
+        pca_noise = scaled_noise @ self.ema_eig_vecs.T
+
+        # Reshape noise and add to original patches
+        pca_noise = pca_noise.reshape_as(x)
+        noisy_patches = x + pca_noise
+
+        if return_patches:
+
+            return noisy_patches,pca_noise
+        else:
+            return noisy_patches
+
 
 
 # class SubGraphSVDPatchPCANoise(nn.Module):
