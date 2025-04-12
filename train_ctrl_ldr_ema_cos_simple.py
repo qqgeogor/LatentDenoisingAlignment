@@ -364,9 +364,16 @@ def train_ebm_gan(args):
                     real_samples = real_samples.detach().requires_grad_(True)
 
                     z = discriminator.net(real_samples).squeeze()
+                    # z2 = discriminator.net(aug_samples).squeeze()
                     with torch.no_grad():
                         z_anchor = teacher_discriminator.net(aug_samples.detach()).squeeze()
                         z_anchor = z_anchor.detach()
+
+
+                        # z_anchor2 = teacher_discriminator.net(real_samples.detach()).squeeze()
+                        # z_anchor2 = z_anchor2.detach()
+
+                    
                     
                     
                     fake_samples,_ = generator(z)
@@ -376,6 +383,10 @@ def train_ebm_gan(args):
 
                     
                     real_energy = F.cosine_similarity(z,z_anchor,dim=-1)
+                    # real_energy2 = F.cosine_similarity(z2,z_anchor2,dim=-1)
+                    # real_energy = real_energy + real_energy2
+                    # real_energy /=2
+
                     fake_energy = F.cosine_similarity(z_fake,z_anchor,dim=-1)
 
                     realistic_logits = real_energy - fake_energy
@@ -394,7 +405,7 @@ def train_ebm_gan(args):
                     r2 = zero_centered_gradient_penalty(fake_samples, fake_energy)
 
                     d_loss = d_loss + args.gp_weight/2 * (r1 + r2)
-                    d_loss = d_loss.mean() + loss_tcr
+                    d_loss = d_loss.mean() + loss_tcr + (1-real_energy).mean()
                 if args.use_amp:
                     scaler.scale(d_loss).backward()
                     scaler.step(d_optimizer)
