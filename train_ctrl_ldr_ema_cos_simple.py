@@ -376,7 +376,7 @@ def train_ebm_gan(args):
 
                     
                     real_energy = F.cosine_similarity(z,z_anchor,dim=-1)
-                    fake_energy = F.cosine_similarity(z_fake,z_anchor,dim=-1).abs()
+                    fake_energy = F.cosine_similarity(z_fake,z_anchor,dim=-1)
 
                     realistic_logits = real_energy - fake_energy
 
