@@ -25,7 +25,19 @@ def zero_centered_gradient_penalty(samples, critics):
     return grad.square().sum([1, 2, 3])
 
 
+# Add MultiViewTransform class
+class MultiViewTransform:
+    
+    def __init__(self, base_transform,n_views=20):
+        self.n_views = n_views
+        self.base_transform = base_transform
 
+    def __call__(self, x):
+        views = []
+        for _ in range(self.n_views):
+            views.append(self.base_transform(x))
+
+        return views
 def R(Z,eps=0.5):
     c = Z.shape[-1]
     b = Z.shape[-2]
@@ -271,6 +283,8 @@ def train_ebm_gan(args):
                             std=[0.5, 0.5, 0.5])
     ])
     
+    transform = MultiViewTransform(transform,n_views=2)
+    
     # Load CIFAR-10
     trainset = torchvision.datasets.CIFAR10(root=args.data_path, train=True,
                                           download=True, transform=transform)
@@ -290,10 +304,8 @@ def train_ebm_gan(args):
     # discriminator = ResNetEnergyNet(img_channels=3, hidden_dim=64).to(device)
     discriminator = Encoder(latent_dim=args.latent_dim).to(device)
     teacher_discriminator = Encoder(latent_dim=args.latent_dim).to(device)
+    teacher_discriminator.load_state_dict(discriminator.state_dict())
 
-    checkpoint = torch.load('../../autodl-tmp/output_cl_dino_all/ebm_gan_checkpoint_1000.pth')
-    teacher_discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
-    
     # Optimizers
     g_optimizer = torch.optim.AdamW(
         generator.parameters(), 
@@ -319,7 +331,7 @@ def train_ebm_gan(args):
     )
     
     momentum_scheduler = cosine_scheduler(
-        base_value=0.9994, final_value=1., 
+        base_value=0.996, final_value=1., 
         epochs=args.epochs, niter_per_ep=len(trainloader), warmup_epochs=0, start_warmup_value=0.9994)
 
     start_epoch = 0
@@ -332,6 +344,7 @@ def train_ebm_gan(args):
             checkpoint = torch.load(checkpoint_path)
             generator.load_state_dict(checkpoint['generator_state_dict'])
             discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+            teacher_discriminator.load_state_dict(checkpoint['teacher_discriminator_state_dict'])
             g_optimizer.load_state_dict(checkpoint['g_optimizer_state_dict'])
             d_optimizer.load_state_dict(checkpoint['d_optimizer_state_dict'])
             g_scheduler.load_state_dict(checkpoint['g_scheduler_state_dict'])
@@ -344,9 +357,11 @@ def train_ebm_gan(args):
         generator.train()
         discriminator.train()
         teacher_discriminator.eval()
-        for i, (real_samples, _) in enumerate(tqdm(trainloader)):
+        for i, (views, _) in enumerate(tqdm(trainloader)):
+            real_samples,aug_samples = views
             batch_size = real_samples.size(0)
             real_samples = real_samples.to(device)
+            aug_samples = aug_samples.to(device)
             it = i + epoch * len(trainloader)
             momentum = momentum_scheduler[it]
 
@@ -355,33 +370,43 @@ def train_ebm_gan(args):
                 d_optimizer.zero_grad()
                 
                 with autocast() if args.use_amp else nullcontext():
-                    # Generate fake samples
-                    with torch.no_grad():
-                        z_teacher = teacher_discriminator.net(real_samples.detach()).squeeze()
-                        z_noised = pca_noiser(z_teacher)
-
-                    z = discriminator.net(real_samples.detach()).squeeze()
-
                     real_samples = real_samples.detach().requires_grad_(True)
 
+                    z = discriminator.net(real_samples).squeeze()
+                    with torch.no_grad():
+                        z_anchor = teacher_discriminator.net(aug_samples.detach()).squeeze()
+                        z_anchor = z_anchor.detach()
                     
+                    
+                    z_noised = pca_noiser(z)
                     fake_samples,_ = generator(z_noised)
                     fake_samples = fake_samples.detach().requires_grad_(True)
-                    # Compute energies
-                    real_energy = discriminator(real_samples)
-                    fake_energy = discriminator(fake_samples)
                     
+                    z_fake = discriminator.net(fake_samples).squeeze()
+                    
+                    
+                    real_energy = F.cosine_similarity(z,z_anchor,dim=-1)
+                    fake_energy = F.cosine_similarity(z_fake,z_anchor,dim=-1)
+                    
+
                     realistic_logits = real_energy - fake_energy
+
+                    
                     d_loss = F.softplus(-realistic_logits)
 
+
+
+
+                    d_loss = d_loss 
+                    
                     loss_tcr = -R(z).mean()
-                    loss_tcr /=384
+                    loss_tcr /=200
                     
                     r1 = zero_centered_gradient_penalty(real_samples, real_energy)
                     r2 = zero_centered_gradient_penalty(fake_samples, fake_energy)
-                    
+
                     d_loss = d_loss + args.gp_weight/2 * (r1 + r2)
-                    d_loss = d_loss.mean() #+ loss_tcr
+                    d_loss = d_loss.mean() + loss_tcr
                 if args.use_amp:
                     scaler.scale(d_loss).backward()
                     scaler.step(d_optimizer)
@@ -390,27 +415,40 @@ def train_ebm_gan(args):
                     d_loss.backward()
                     d_optimizer.step()
 
+            with torch.no_grad():
+                for param_q, param_k in zip(discriminator.parameters(), teacher_discriminator.parameters()):
+                    param_k.data = momentum * param_k.data + (1 - momentum) * param_q.data
 
             # Train Generator
             g_optimizer.zero_grad()
             
             with autocast() if args.use_amp else nullcontext():
                 # Generate new fake samples
+                z = z.detach()
+                z = discriminator.net(real_samples).squeeze()
                 with torch.no_grad():
-                    z = teacher_discriminator.net(real_samples.detach()).squeeze()
-                    z_noised = pca_noiser(z)
-
-                fake_samples,loss_kld = generator(z_noised)
-                fake_energy = discriminator(fake_samples)
-                real_energy = discriminator(real_samples)
+                    z_anchor = teacher_discriminator.net(aug_samples.detach()).squeeze()
+                    z_anchor = z_anchor.detach()
+                    
+                z_noised = pca_noiser(z)
+                fake_samples,_ = generator(z_noised)
+                
                 z_fake = discriminator.net(fake_samples).squeeze()
 
-                loss_cos = 1 - F.cosine_similarity(z_fake,z,dim=-1).mean()
-                loss_mse = F.mse_loss(fake_samples,real_samples).mean()
+                
+                real_energy = F.cosine_similarity(z,z_anchor,dim=-1)
+                fake_energy = F.cosine_similarity(z_fake,z_anchor,dim=-1)
+
+                loss_tgr = -R(z_fake).mean()
+                loss_tgr /=200
+                
 
                 realistic_logits = fake_energy - real_energy
                 g_loss = F.softplus(-realistic_logits)
-                g_loss = g_loss.mean() #+ loss_cos # + loss_kld 
+
+
+
+                g_loss = g_loss.mean() 
             if args.use_amp:
                 scaler.scale(g_loss).backward()
                 scaler.step(g_optimizer)
@@ -426,9 +464,7 @@ def train_ebm_gan(args):
                       f'D_loss: {d_loss.item():.4f}, G_loss: {g_loss.item():.4f}, '
                       f'r1: {r1.mean().item():.4f}, r2: {r2.mean().item():.4f}, '
                       f'loss_tcr: {loss_tcr.item():.4f}, '
-                      f'loss_cos: {loss_cos.item():.4f}, '
-                      f'loss_kld: {loss_kld.item():.4f}, '
-                      f'loss_mse: {loss_mse.item():.4f}, '
+                      f'loss_tgr: {loss_tgr.item():.4f}, '
                       f'Real Energy: {real_energy.mean().item():.4f}, '
                       f'Fake Energy: {fake_energy.mean().item():.4f}, '
                       f'G_LR: {current_g_lr:.6f}, D_LR: {current_d_lr:.6f}'
@@ -438,8 +474,7 @@ def train_ebm_gan(args):
         g_scheduler.step()
         d_scheduler.step()
         
-        real_samples = next(iter(trainloader))[0].to(device)
-        save_gan_samples(generator, teacher_discriminator,pca_noiser, epoch, args.output_dir, device,real_samples=real_samples)
+        save_gan_samples(generator, discriminator,pca_noiser, epoch, args.output_dir, device,real_samples=real_samples)
     
         # Save samples and model checkpoints
         if epoch % args.save_freq == 0:

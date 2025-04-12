@@ -22,10 +22,10 @@ def zero_centered_gradient_penalty(samples, critics):
     # calculate energy of critics
     # critics is a tensor of shape [b, c] where b is batch size and c is number of channels
     # compute gradient of critics with respect to samples
-    energies = (critics**2).sum(-1)  # Sum all critic values to get scalar energy for gradient computation
-    # energies = R(critics)
+    # critics = (critics**2).sum(-1)  # Sum all critic values to get scalar energy for gradient computation
+    # critics = R(critics)
 
-    grad, = torch.autograd.grad(outputs=energies.sum(), inputs=samples, create_graph=True)
+    grad, = torch.autograd.grad(outputs=critics.sum(), inputs=samples, create_graph=True)
     return grad.square().sum([1, 2, 3])
 
 
@@ -559,6 +559,12 @@ def train_ebm_gan(args):
                     r1 = zero_centered_gradient_penalty(real_samples, real_energy)
                     r2 = zero_centered_gradient_penalty(fake_samples, fake_energy)
                     
+
+                    # realistic_logits = torch.einsum('b c,b d-> b',[real_energy,fake_energy]).unsqueeze(-1)
+                    realistic_logits = real_energy - fake_energy
+                    realistic_logits = realistic_logits.sum(-1)
+                    d_loss = F.softplus(-realistic_logits)
+
                     d_loss = d_loss + args.gp_weight/2 * (r1 + r2)
                     
                     d_loss = d_loss.mean() + loss_tcr
@@ -589,17 +595,23 @@ def train_ebm_gan(args):
                 # # g_loss = - F.cosine_similarity(real_energy,fake_energy,dim=-1).mean()
 
                 # # g_loss = ((real_energy-fake_energy)**2).mean(-1).mean()
-                g_loss = 1-F.cosine_similarity(fake_energy,real_energy.detach()).mean()
-                g_loss += 1-F.cosine_similarity(fake_energy.detach(),real_energy).mean()
-                g_loss/=2
-                loss_tgr = -0.5*R(z).mean() -0.5*R(z_fake).mean()
-                loss_tgr /=200
-                # loss_tgr = -R(z_fake).mean()    
-                # 
-                # g_loss = mcr(real_energy,fake_energy)#/200
-                # g_loss = F.softplus(g_loss)
-                # g_loss,g_expd,g_comp = mcr(real_energy,fake_energy)
-                g_loss = g_loss.mean() + loss_tgr #+ loss_cos # + loss_kld 
+                # g_loss = 1-F.cosine_similarity(fake_energy,real_energy.detach()).mean()
+                # g_loss += 1-F.cosine_similarity(fake_energy.detach(),real_energy).mean()
+                # g_loss/=2
+                # loss_tgr = -0.5*R(z).mean() -0.5*R(z_fake).mean()
+                # loss_tgr /=200
+                # # loss_tgr = -R(z_fake).mean()    
+                # # 
+                # # g_loss = mcr(real_energy,fake_energy)#/200
+                # # g_loss = F.softplus(g_loss)
+                # # g_loss,g_expd,g_comp = mcr(real_energy,fake_energy)
+                # realistic_logits = torch.einsum('b c,b d-> b',[real_energy,fake_energy]).unsqueeze(-1)
+
+                realistic_logits = fake_energy - real_energy
+                realistic_logits = realistic_logits.sum(-1)
+                g_loss = F.softplus(-realistic_logits)
+                
+                g_loss = g_loss.mean() #+ loss_tgr #+ loss_cos # + loss_kld 
  
 
             if args.use_amp:
@@ -616,9 +628,9 @@ def train_ebm_gan(args):
                 current_d_lr = d_optimizer.param_groups[0]['lr']
                 print(f'Epoch [{epoch}/{args.epochs}], Step [{i}/{len(trainloader)}], '
                       f'D_loss: {d_loss.item():.4f}, G_loss: {g_loss.item():.4f}, '
-                    #   f'r1: {r1.mean().item():.4f}, r2: {r2.mean().item():.4f}, '
+                      f'r1: {r1.mean().item():.4f}, r2: {r2.mean().item():.4f}, '
                       f'loss_tcr: {loss_tcr.item():.4f}, '
-                      f'loss_tgr: {loss_tgr.item():.4f}, '
+                    #   f'loss_tgr: {loss_tgr.item():.4f}, '
                     #   f'd_expd: {d_expd.item():.4f}, d_comp: {d_comp.item():.4f}, '
                     #   f'g_expd: {g_expd.item():.4f}, g_comp: {g_comp.item():.4f}, '
                       f'loss_cos: {loss_cos.item():.4f}, '

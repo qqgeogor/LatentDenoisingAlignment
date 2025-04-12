@@ -12,16 +12,204 @@ import numpy as np
 from tqdm import tqdm
 import argparse
 import torch.nn.functional as F
+from contextlib import nullcontext
 # Set matplotlib backend to avoid GUI dependencies
 os.environ['MPLBACKEND'] = 'Agg'
 import matplotlib
 matplotlib.use('Agg')
 
 def zero_centered_gradient_penalty(samples, critics):
-    
+    # calculate energy of critics
+    # critics is a tensor of shape [b, c] where b is batch size and c is number of channels
+    # compute gradient of critics with respect to samples
+    # critics = (critics**2).sum(-1)  # Sum all critic values to get scalar energy for gradient computation
+    # critics = R(critics)
+
     grad, = torch.autograd.grad(outputs=critics.sum(), inputs=samples, create_graph=True)
     return grad.square().sum([1, 2, 3])
 
+
+
+class MCRGANloss(nn.Module):
+
+    def __init__(self, gam1=1., gam2=1., gam3=1., eps=0.5, numclasses=1000, mode=1, rho=None):
+        super(MCRGANloss, self).__init__()
+
+        self.num_class = numclasses
+        self.train_mode = mode
+        self.faster_logdet = False
+        self.gam1 = gam1
+        self.gam2 = gam2
+        self.gam3 = gam3
+        self.eps = eps
+
+    def forward(self, Z, Z_bar, real_label, ith_inner_loop, num_inner_loop):
+
+        # t = time.time()
+        # errD, empi = self.old_version(Z, Z_bar, real_label, ith_inner_loop, num_inner_loop)
+        errD, empi = self.fast_version(Z, Z_bar, real_label, ith_inner_loop, num_inner_loop)
+        # print("faster version time: ", time.time() - t)
+        # print("faster errD", errD)
+
+        return errD, empi
+
+    def old_version(self, Z, Z_bar, real_label, ith_inner_loop, num_inner_loop):
+
+        """ original version, need to calculate 52 times log-det"""
+        if self.train_mode == 2:
+            loss_z, _ = self.deltaR(Z, real_label, self.num_class)
+            assert num_inner_loop >= 2
+            if (ith_inner_loop + 1) % num_inner_loop != 0:
+                return loss_z, None
+
+            loss_h, _ = self.deltaR(Z_bar, real_label, self.num_class)
+            errD = self.gam1 * loss_z + self.gam2 * loss_h
+            empi = [loss_z, loss_h]
+            term3 = 0.
+
+            for i in range(self.num_class):
+                new_Z = torch.cat((Z[real_label == i], Z_bar[real_label == i]), 0)
+                new_label = torch.cat(
+                    (torch.zeros_like(real_label[real_label == i]),
+                     torch.ones_like(real_label[real_label == i]))
+                )
+                loss, _ = self.deltaR(new_Z, new_label, 2)
+                term3 += loss
+            empi = empi + [term3]
+            errD += self.gam3 * term3
+
+        elif self.train_mode == 1:
+
+            loss_z, _ = self.deltaR(Z, real_label, self.num_class)
+            loss_h, _ = self.deltaR(Z_bar, real_label, self.num_class)
+            errD = self.gam1 * loss_z + self.gam2 * loss_h
+            empi = [loss_z, loss_h]
+            term3 = 0.
+
+            for i in range(self.num_class):
+                new_Z = torch.cat((Z[real_label == i], Z_bar[real_label == i]), 0)
+                new_label = torch.cat(
+                    (torch.zeros_like(real_label[real_label == i]),
+                     torch.ones_like(real_label[real_label == i]))
+                )
+                loss, _ = self.deltaR(new_Z, new_label, 2)
+                term3 += loss
+            empi = empi + [term3]
+            errD += self.gam3 * term3
+        elif self.train_mode == 0:
+            new_Z = torch.cat((Z, Z_bar), 0)
+            new_label = torch.cat((torch.zeros_like(real_label), torch.ones_like(real_label)))
+            errD, em = self.deltaR(new_Z, new_label, 2)
+            empi = (em[0], em[1])
+        else:
+            raise ValueError()
+
+        return errD, empi
+
+    def fast_version(self, Z, Z_bar, real_label, ith_inner_loop, num_inner_loop):
+
+        """ decrease the times of calculate log-det  from 52 to 32"""
+
+        if self.train_mode == 2:
+            z_total, (z_discrimn_item, z_compress_item, z_compress_losses, z_scalars) = self.deltaR(Z, real_label,
+                                                                                                    self.num_class)
+            assert num_inner_loop >= 2
+            if (ith_inner_loop + 1) % num_inner_loop != 0:
+                # print(f"{ith_inner_loop + 1}/{num_inner_loop}")
+                # print("calculate delta R(z)")
+                return z_total, None
+
+            zbar_total, (zbar_discrimn_item, zbar_compress_item, zbar_compress_losses, zbar_scalars) = self.deltaR(
+                Z_bar, real_label, self.num_class)
+            empi = [z_total, zbar_total]
+
+            itemRzjzjbar = 0.
+            for j in range(self.num_class):
+                new_z = torch.cat((Z[real_label == j], Z_bar[real_label == j]), 0)
+                R_zjzjbar = self.compute_discrimn_loss(new_z.T)
+                itemRzjzjbar += R_zjzjbar
+
+            errD_ = self.gam1 * (z_discrimn_item - z_compress_item) + \
+                    self.gam2 * (zbar_discrimn_item - zbar_compress_item) + \
+                    self.gam3 * (itemRzjzjbar - 0.25 * sum(z_compress_losses) - 0.25 * sum(zbar_compress_losses))
+            errD = -errD_
+
+            empi = empi + [-itemRzjzjbar + 0.25 * sum(z_compress_losses) + 0.25 * sum(zbar_compress_losses)]
+            # print("calculate multi")
+
+        elif self.train_mode == 1:
+            z_total, (z_discrimn_item, z_compress_item, z_compress_losses, z_scalars) = self.deltaR(Z, real_label, self.num_class)
+            zbar_total, (zbar_discrimn_item, zbar_compress_item, zbar_compress_losses, zbar_scalars) = self.deltaR(Z_bar, real_label, self.num_class)
+            empi = [z_total, zbar_total]
+
+            itemRzjzjbar = 0.
+            for j in range(self.num_class):
+                new_z = torch.cat((Z[real_label == j], Z_bar[real_label == j]), 0)
+                R_zjzjbar = self.compute_discrimn_loss(new_z.T)
+                itemRzjzjbar += R_zjzjbar
+
+            errD_ = self.gam1 * (z_discrimn_item - z_compress_item) + \
+                    self.gam2 * (zbar_discrimn_item - zbar_compress_item) + \
+                    self.gam3 * (itemRzjzjbar - 0.25 * sum(z_compress_losses) - 0.25 * sum(zbar_compress_losses))
+            errD = -errD_
+
+            empi = empi + [-itemRzjzjbar + 0.25 * sum(z_compress_losses) + 0.25 * sum(zbar_compress_losses)]
+
+        elif self.train_mode == 0:
+            new_Z = torch.cat((Z, Z_bar), 0)
+            new_label = torch.cat((torch.zeros_like(real_label), torch.ones_like(real_label)))
+            errD, extra = self.deltaR(new_Z, new_label, 2)
+            empi = (extra[0], extra[1])
+
+        elif self.train_mode == 10:
+            errD, empi = self.double_loop(Z, Z_bar, real_label, ith_inner_loop, num_inner_loop)
+        else:
+            raise ValueError()
+
+        return errD, empi
+
+    def logdet(self, X):
+
+        if self.faster_logdet:
+            return 2 * torch.sum(torch.log(torch.diag(torch.linalg.cholesky(X, upper=True))))
+        else:
+            return torch.logdet(X)
+
+    def compute_discrimn_loss(self, Z):
+        """Theoretical Discriminative Loss."""
+        d, n = Z.shape
+        I = torch.eye(d).to(Z.device)
+        scalar = d / (n * self.eps)
+        logdet = self.logdet(I + scalar * Z @ Z.T)
+        return logdet / 2.
+
+    def compute_compress_loss(self, Z, Pi):
+        """Theoretical Compressive Loss."""
+        d, n = Z.shape
+        I = torch.eye(d).to(Z.device)
+        compress_loss = []
+        scalars = []
+        for j in range(Pi.shape[1]):
+            Z_ = Z[:, Pi[:, j] == 1]
+            trPi = Pi[:, j].sum() + 1e-8
+            scalar = d / (trPi * self.eps)
+            log_det = 1. if Pi[:, j].sum() == 0 else self.logdet(I + scalar * Z_ @ Z_.T)
+            compress_loss.append(log_det)
+            scalars.append(trPi / (2 * n))
+        return compress_loss, scalars
+
+    def deltaR(self, Z, Y, num_classes):
+
+        Pi = F.one_hot(Y, num_classes).to(Z.device)
+        discrimn_loss = self.compute_discrimn_loss(Z.T)
+        compress_loss, scalars = self.compute_compress_loss(Z.T, Pi)
+
+        compress_term = 0.
+        for z, s in zip(compress_loss, scalars):
+            compress_term += s * z
+        total_loss = discrimn_loss - compress_term
+
+        return -total_loss, (discrimn_loss, compress_term, compress_loss, scalars)
 
 
 def R(Z,eps=0.5):
@@ -54,7 +242,9 @@ def R_nonorm(Z,eps=0.5):
     return out.mean()
 
 def mcr(Z1,Z2):
-    return R(torch.cat([Z1,Z2],dim=0))-0.5*R(Z1)-0.5*R(Z2)
+    expd = R(torch.cat([Z1,Z2],dim=0))
+    comp = 0.5*R(Z1)+0.5*R(Z2)
+    return expd-comp,expd,comp
 
 
 
@@ -164,7 +354,35 @@ class Decoder(nn.Module):
         self.final_conv = nn.Conv2d(256, 3, kernel_size=3, padding=1)
         self.tanh = nn.Tanh()
         
+         # Variational part
+        self.fc_mu = nn.Linear(latent_dim, latent_dim)
+        self.fc_logvar = nn.Linear(latent_dim, latent_dim)
+
+        self.projection = nn.Linear(latent_dim*2,latent_dim)
+
+
+    def kl_divergence(self, mu, logvar):
+        # KL divergence between N(mu, sigma) and N(0, 1)
+        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
+    
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+        return z
+
     def forward(self, z):
+        # mu = self.fc_mu(z)
+        # logvar = self.fc_logvar(z)
+        # z_reparam = self.reparameterize(mu,logvar)
+        # kld = self.kl_divergence(mu,logvar).mean()
+
+
+        # n = torch.randn_like(z)
+        # kld = n.mean()
+        
+        # z = self.projection(torch.cat([z,n],dim=-1))
+        kld = z.mean()
         x = self.dense(z)
         x = self.reshape(x)  # -> 4x4x256
         x = self.resblock1(x)  # -> 8x8x256
@@ -174,7 +392,7 @@ class Decoder(nn.Module):
         x = self.relu(x)
         x = self.final_conv(x)  # -> 32x32x3
         x = self.tanh(x)
-        return x
+        return x,kld
 # Now let's update the Encoder and Decoder with these specific ResBlock implementations:
 
 class Encoder(nn.Module):
@@ -198,7 +416,13 @@ class Encoder(nn.Module):
         # Final dense layer to 128-dim latent space
         self.dense = nn.Linear(128, latent_dim)
         
-        self.head = nn.Linear(latent_dim,latent_dim)
+        self.head = nn.Sequential(
+            nn.Linear(latent_dim,latent_dim),
+            nn.ReLU(),
+            nn.Linear(latent_dim,latent_dim),
+            nn.ReLU(),
+            nn.Linear(latent_dim,1),
+        )
     
     def net(self, x):
         x = self.resblock1(x)
@@ -209,9 +433,8 @@ class Encoder(nn.Module):
         x = self.global_pool(x)
         x = x.view(x.size(0), -1)
         x = self.dense(x)
+        x = F.normalize(x)
         return x
-    
-    
     
     def forward(self, x):
         x = self.net(x)
@@ -254,15 +477,15 @@ def train_ebm_gan(args):
     discriminator = Encoder(latent_dim=args.latent_dim).to(device)
     
     # Optimizers
-    g_optimizer = torch.optim.AdamW(
+    g_optimizer = torch.optim.Adam(
         generator.parameters(), 
         lr=args.g_lr, 
         betas=(args.g_beta1, args.g_beta2)
     )
-    d_optimizer = torch.optim.AdamW(
+    d_optimizer = torch.optim.Adam(
         discriminator.parameters(), 
         lr=args.d_lr, 
-        betas=(0.5, 0.999)
+        betas=(args.g_beta1, args.g_beta2)
     )
     
     # Add Cosine Annealing schedulers
@@ -278,6 +501,8 @@ def train_ebm_gan(args):
     )
     start_epoch = 0
     
+    # loss_fn = MCRGANloss(gam1=1,gam2=1,gam3=1,eps=0.5,numclasses=1000,mode=0,rho=None)
+
     # Add checkpoint loading logic
     if args.resume:
         checkpoint_path = args.resume
@@ -306,51 +531,97 @@ def train_ebm_gan(args):
             for _ in range(args.n_critic):
                 d_optimizer.zero_grad()
                 
-                with autocast():
+                with autocast() if args.use_amp else nullcontext():
                     # Generate fake samples
                     z = discriminator.net(real_samples.detach()).squeeze()
 
                     real_samples = real_samples.detach().requires_grad_(True)
-                    fake_samples = generator(z).detach().requires_grad_(True)
-
+                    fake_samples,_ = generator(z)
+                    fake_samples = fake_samples.detach().requires_grad_(True)
                     # Compute energies
-                    real_energy = discriminator(real_samples)
-                    fake_energy = discriminator(fake_samples)
-                    
-                    realistic_logits = real_energy - fake_energy
-                    d_loss = F.softplus(-realistic_logits).mean(-1)
+                    real_energy = discriminator.net(real_samples).squeeze()
+                    fake_energy = discriminator.net(fake_samples).squeeze()
+                    z_fake = discriminator.net(fake_samples.detach()).squeeze()
+                    # realistic_logits = real_energy - fake_energy
+                    # d_loss = F.softplus(-realistic_logits)
+                    # d_loss = F.cosine_similarity(real_energy,fake_energy,dim=-1).abs().mean()
+                    # d_loss = -((real_energy-fake_energy)**2).mean(-1).mean()
+                    d_loss = F.cosine_similarity(real_energy.detach(),fake_energy).abs().mean()
+                    d_loss += F.cosine_similarity(real_energy,fake_energy.detach()).abs().mean()
+                    d_loss/=2
+                    # d_loss = -d_loss
+                    # d_loss = F.softplus(d_loss)
+                    # d_loss = -mcr(real_energy,fake_energy)#/200
+                    loss_tcr = -0.5*R(z).mean() -0.5*R(z_fake).mean()
 
-                    loss_tcr = -R(z).mean()
                     loss_tcr /=200
 
                     r1 = zero_centered_gradient_penalty(real_samples, real_energy)
                     r2 = zero_centered_gradient_penalty(fake_samples, fake_energy)
-                    # d_loss = F.cosine_similarity(real_energy,fake_energy,dim=-1).abs()
-                    d_loss = d_loss + args.gp_weight/2 * (r1 + r2)
-                    d_loss = d_loss.mean() + loss_tcr
+                    
 
-                scaler.scale(d_loss).backward()
-                scaler.step(d_optimizer)
+                    # realistic_logits = torch.einsum('b c,b d-> b',[real_energy,fake_energy]).unsqueeze(-1)
+                    realistic_logits = real_energy - fake_energy
+                    realistic_logits = realistic_logits.sum(-1)
+                    d_loss = F.softplus(-realistic_logits)
+
+                    d_loss = d_loss + args.gp_weight/2 * (r1 + r2)
+                    
+                    d_loss = d_loss.mean() + loss_tcr
+                if args.use_amp:    
+                    scaler.scale(d_loss).backward()
+                    scaler.step(d_optimizer)
+                    scaler.update()
+                else:
+                    d_loss.backward()
+                    d_optimizer.step()
             
             # Train Generator
             g_optimizer.zero_grad()
             
-            with autocast():
+            with autocast() if args.use_amp else nullcontext():
                 # Generate new fake samples
                 z = discriminator.net(real_samples.detach()).squeeze()
-                fake_samples = generator(z)
-                fake_energy = discriminator(fake_samples)
-                real_energy = discriminator(real_samples)
+                fake_samples,loss_kld = generator(z)
+                fake_energy = discriminator.net(fake_samples).squeeze()
+                real_energy = discriminator.net(real_samples).squeeze()
+                z_fake = discriminator.net(fake_samples).squeeze()
+
+                loss_cos = 1 - F.cosine_similarity(z_fake,z,dim=-1).mean()
+                loss_mse = F.mse_loss(fake_samples,real_samples).mean()
+
+                # # realistic_logits = fake_energy - real_energy
+                # # g_loss = F.softplus(-realistic_logits)
+                # # g_loss = - F.cosine_similarity(real_energy,fake_energy,dim=-1).mean()
+
+                # # g_loss = ((real_energy-fake_energy)**2).mean(-1).mean()
+                # g_loss = 1-F.cosine_similarity(fake_energy,real_energy.detach()).mean()
+                # g_loss += 1-F.cosine_similarity(fake_energy.detach(),real_energy).mean()
+                # g_loss/=2
+                # loss_tgr = -0.5*R(z).mean() -0.5*R(z_fake).mean()
+                # loss_tgr /=200
+                # # loss_tgr = -R(z_fake).mean()    
+                # # 
+                # # g_loss = mcr(real_energy,fake_energy)#/200
+                # # g_loss = F.softplus(g_loss)
+                # # g_loss,g_expd,g_comp = mcr(real_energy,fake_energy)
+                # realistic_logits = torch.einsum('b c,b d-> b',[real_energy,fake_energy]).unsqueeze(-1)
 
                 realistic_logits = fake_energy - real_energy
-                g_loss = F.softplus(-realistic_logits).mean(-1)
-                # g_loss = 1-F.cosine_similarity(real_energy,fake_energy,dim=-1)
-                g_loss = g_loss.mean()
+                realistic_logits = realistic_logits.sum(-1)
+                g_loss = F.softplus(-realistic_logits)
+                
+                g_loss = g_loss.mean() #+ loss_tgr #+ loss_cos # + loss_kld 
+ 
+
+            if args.use_amp:
+                scaler.scale(g_loss).backward()
+                scaler.step(g_optimizer)
+                scaler.update()
+            else:
+                g_loss.backward()
+                g_optimizer.step()
             
-            scaler.scale(g_loss).backward()
-            scaler.step(g_optimizer)
-            
-            scaler.update()
             
             if i % args.log_freq == 0:
                 current_g_lr = g_optimizer.param_groups[0]['lr']
@@ -359,6 +630,12 @@ def train_ebm_gan(args):
                       f'D_loss: {d_loss.item():.4f}, G_loss: {g_loss.item():.4f}, '
                       f'r1: {r1.mean().item():.4f}, r2: {r2.mean().item():.4f}, '
                       f'loss_tcr: {loss_tcr.item():.4f}, '
+                    #   f'loss_tgr: {loss_tgr.item():.4f}, '
+                    #   f'd_expd: {d_expd.item():.4f}, d_comp: {d_comp.item():.4f}, '
+                    #   f'g_expd: {g_expd.item():.4f}, g_comp: {g_comp.item():.4f}, '
+                      f'loss_cos: {loss_cos.item():.4f}, '
+                      f'loss_kld: {loss_kld.item():.4f}, '
+                      f'loss_mse: {loss_mse.item():.4f}, '
                       f'Real Energy: {real_energy.mean().item():.4f}, '
                       f'Fake Energy: {fake_energy.mean().item():.4f}, '
                       f'G_LR: {current_g_lr:.6f}, D_LR: {current_d_lr:.6f}'
@@ -392,7 +669,7 @@ def save_gan_samples(generator, discriminator, epoch, output_dir, device, n_samp
         
         z = discriminator.net(real_samples.detach()).squeeze()
 
-        fake_samples = generator(z)
+        fake_samples,_ = generator(z)
         
         # Changed 'range' to 'value_range'
         grid = make_grid(fake_samples, nrow=6, normalize=True, value_range=(-1, 1))
@@ -447,9 +724,9 @@ def get_args_parser():
                         help='Weight of gradient penalty')
     
     # Modify learning rates
-    parser.add_argument('--g_beta1', default=0.5, type=float,
+    parser.add_argument('--g_beta1', default=0.0, type=float,
                         help='Beta1 for generator optimizer')
-    parser.add_argument('--g_beta2', default=0.999, type=float,
+    parser.add_argument('--g_beta2', default=0.9, type=float,
                         help='Beta2 for generator optimizer')
     
     parser.add_argument('--cls', default=-1, type=int,

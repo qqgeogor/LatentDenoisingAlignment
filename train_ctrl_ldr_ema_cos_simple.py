@@ -9,7 +9,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from torchvision.utils import make_grid
 import numpy as np
-from utils_ibot import SVDPCANoise,cosine_scheduler
+
 from tqdm import tqdm
 import argparse
 import torch.nn.functional as F
@@ -20,12 +20,38 @@ import matplotlib
 matplotlib.use('Agg')
 
 
+def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epochs=0, start_warmup_value=0):
+    warmup_schedule = np.array([])
+    warmup_iters = warmup_epochs * niter_per_ep
+    if warmup_epochs > 0:
+        warmup_schedule = np.linspace(start_warmup_value, base_value, warmup_iters)
+
+    iters = np.arange(epochs * niter_per_ep - warmup_iters)
+    schedule = final_value + 0.5 * (base_value - final_value) * (1 + np.cos(np.pi * iters / len(iters)))
+
+    schedule = np.concatenate((warmup_schedule, schedule))
+    assert len(schedule) == epochs * niter_per_ep
+    return schedule
+
+
 def zero_centered_gradient_penalty(samples, critics):
     grad, = torch.autograd.grad(outputs=critics.sum(), inputs=samples, create_graph=True)
     return grad.square().sum([1, 2, 3])
 
 
+# Add MultiViewTransform class
+class MultiViewTransform:
+    
+    def __init__(self, base_transform,n_views=20):
+        self.n_views = n_views
+        self.base_transform = base_transform
 
+    def __call__(self, x):
+        views = []
+        for _ in range(self.n_views):
+            views.append(self.base_transform(x))
+
+        return views
 def R(Z,eps=0.5):
     c = Z.shape[-1]
     b = Z.shape[-2]
@@ -55,30 +81,7 @@ def R_nonorm(Z,eps=0.5):
     out = 0.5*torch.logdet(cov)
     return out.mean()
 
-def mcr(Z1,Z2):
-    return R(torch.cat([Z1,Z2],dim=0))-0.5*R(Z1)-0.5*R(Z2)
 
-
-
-# Add SimSiam loss function
-def simsiam_loss(p1, p2, h1, h2):
-
-    loss_tcr = -R(p1).mean()
-    loss_tcr *=1e-2
-
-    # Negative cosine similarity
-    loss_cos = (F.cosine_similarity(h1, p2.detach(), dim=-1).mean() + 
-             F.cosine_similarity(h2, p1.detach(), dim=-1).mean()) * 0.5
-    
-    loss_cos = 1-loss_cos
-
-    return loss_cos,loss_tcr
-
-def tcr_loss(Z1,Z2):
-    Z1 = F.normalize(Z1,p=2,dim=-1)
-    Z2 = F.normalize(Z2,p=2,dim=-1)
-    Z = (Z1+Z2)/2
-    return R_nonorm(Z)
 
 # Add a proper reshape layer
 class Reshape(nn.Module):
@@ -271,6 +274,8 @@ def train_ebm_gan(args):
                             std=[0.5, 0.5, 0.5])
     ])
     
+    transform = MultiViewTransform(transform,n_views=2)
+    
     # Load CIFAR-10
     trainset = torchvision.datasets.CIFAR10(root=args.data_path, train=True,
                                           download=True, transform=transform)
@@ -287,10 +292,8 @@ def train_ebm_gan(args):
 
     # Initialize models
     generator = Decoder(latent_dim=args.latent_dim).to(device)
-    # discriminator = ResNetEnergyNet(img_channels=3, hidden_dim=64).to(device)
     discriminator = Encoder(latent_dim=args.latent_dim).to(device)
     teacher_discriminator = Encoder(latent_dim=args.latent_dim).to(device)
-
     checkpoint = torch.load('../../autodl-tmp/output_cl_dino_all/ebm_gan_checkpoint_1000.pth')
     teacher_discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
     
@@ -319,11 +322,11 @@ def train_ebm_gan(args):
     )
     
     momentum_scheduler = cosine_scheduler(
-        base_value=0.9994, final_value=1., 
+        base_value=0.996, final_value=1., 
         epochs=args.epochs, niter_per_ep=len(trainloader), warmup_epochs=0, start_warmup_value=0.9994)
 
     start_epoch = 0
-    pca_noiser = SVDPCANoise(noise_scale=0.5,kernel='linear',gamma=1.0)
+    
     # Add checkpoint loading logic
     if args.resume:
         checkpoint_path = args.resume
@@ -332,6 +335,7 @@ def train_ebm_gan(args):
             checkpoint = torch.load(checkpoint_path)
             generator.load_state_dict(checkpoint['generator_state_dict'])
             discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+            teacher_discriminator.load_state_dict(checkpoint['teacher_discriminator_state_dict'])
             g_optimizer.load_state_dict(checkpoint['g_optimizer_state_dict'])
             d_optimizer.load_state_dict(checkpoint['d_optimizer_state_dict'])
             g_scheduler.load_state_dict(checkpoint['g_scheduler_state_dict'])
@@ -344,9 +348,11 @@ def train_ebm_gan(args):
         generator.train()
         discriminator.train()
         teacher_discriminator.eval()
-        for i, (real_samples, _) in enumerate(tqdm(trainloader)):
+        for i, (views, _) in enumerate(tqdm(trainloader)):
+            real_samples,aug_samples = views
             batch_size = real_samples.size(0)
             real_samples = real_samples.to(device)
+            aug_samples = aug_samples.to(device)
             it = i + epoch * len(trainloader)
             momentum = momentum_scheduler[it]
 
@@ -355,33 +361,40 @@ def train_ebm_gan(args):
                 d_optimizer.zero_grad()
                 
                 with autocast() if args.use_amp else nullcontext():
-                    # Generate fake samples
-                    with torch.no_grad():
-                        z_teacher = teacher_discriminator.net(real_samples.detach()).squeeze()
-                        z_noised = pca_noiser(z_teacher)
-
-                    z = discriminator.net(real_samples.detach()).squeeze()
-
                     real_samples = real_samples.detach().requires_grad_(True)
 
+                    z = discriminator.net(real_samples).squeeze()
+                    with torch.no_grad():
+                        z_anchor = teacher_discriminator.net(aug_samples.detach()).squeeze()
+                        z_anchor = z_anchor.detach()
                     
-                    fake_samples,_ = generator(z_noised)
+                    
+                    fake_samples,_ = generator(z)
                     fake_samples = fake_samples.detach().requires_grad_(True)
-                    # Compute energies
-                    real_energy = discriminator(real_samples)
-                    fake_energy = discriminator(fake_samples)
                     
+                    z_fake = discriminator.net(fake_samples).squeeze()
+
+                    
+                    real_energy = F.cosine_similarity(z,z_anchor,dim=-1)
+                    fake_energy = F.cosine_similarity(z_fake,z_anchor,dim=-1).abs()
+
                     realistic_logits = real_energy - fake_energy
+
+                    
                     d_loss = F.softplus(-realistic_logits)
 
+
+
+                    d_loss = d_loss 
+                    
                     loss_tcr = -R(z).mean()
-                    loss_tcr /=384
+                    loss_tcr /=200
                     
                     r1 = zero_centered_gradient_penalty(real_samples, real_energy)
                     r2 = zero_centered_gradient_penalty(fake_samples, fake_energy)
-                    
+
                     d_loss = d_loss + args.gp_weight/2 * (r1 + r2)
-                    d_loss = d_loss.mean() #+ loss_tcr
+                    d_loss = d_loss.mean() + loss_tcr
                 if args.use_amp:
                     scaler.scale(d_loss).backward()
                     scaler.step(d_optimizer)
@@ -396,21 +409,34 @@ def train_ebm_gan(args):
             
             with autocast() if args.use_amp else nullcontext():
                 # Generate new fake samples
-                with torch.no_grad():
-                    z = teacher_discriminator.net(real_samples.detach()).squeeze()
-                    z_noised = pca_noiser(z)
 
-                fake_samples,loss_kld = generator(z_noised)
-                fake_energy = discriminator(fake_samples)
-                real_energy = discriminator(real_samples)
+                z = z.detach()
+                z = discriminator.net(real_samples).squeeze()
+                with torch.no_grad():
+                    z_anchor = teacher_discriminator.net(aug_samples.detach()).squeeze()
+                    z_anchor = z_anchor.detach()
+                    
+
+                fake_samples,_ = generator(z)
+
                 z_fake = discriminator.net(fake_samples).squeeze()
 
-                loss_cos = 1 - F.cosine_similarity(z_fake,z,dim=-1).mean()
-                loss_mse = F.mse_loss(fake_samples,real_samples).mean()
+                
+                real_energy = F.cosine_similarity(z,z_anchor,dim=-1)
+                fake_energy = F.cosine_similarity(z_fake,z_anchor,dim=-1)
+
+                loss_tgr = -R(z_fake).mean()
+                loss_tgr /=200
+                
 
                 realistic_logits = fake_energy - real_energy
                 g_loss = F.softplus(-realistic_logits)
-                g_loss = g_loss.mean() #+ loss_cos # + loss_kld 
+
+
+
+
+
+                g_loss = g_loss.mean() 
             if args.use_amp:
                 scaler.scale(g_loss).backward()
                 scaler.step(g_optimizer)
@@ -426,9 +452,7 @@ def train_ebm_gan(args):
                       f'D_loss: {d_loss.item():.4f}, G_loss: {g_loss.item():.4f}, '
                       f'r1: {r1.mean().item():.4f}, r2: {r2.mean().item():.4f}, '
                       f'loss_tcr: {loss_tcr.item():.4f}, '
-                      f'loss_cos: {loss_cos.item():.4f}, '
-                      f'loss_kld: {loss_kld.item():.4f}, '
-                      f'loss_mse: {loss_mse.item():.4f}, '
+                      f'loss_tgr: {loss_tgr.item():.4f}, '
                       f'Real Energy: {real_energy.mean().item():.4f}, '
                       f'Fake Energy: {fake_energy.mean().item():.4f}, '
                       f'G_LR: {current_g_lr:.6f}, D_LR: {current_d_lr:.6f}'
@@ -438,8 +462,7 @@ def train_ebm_gan(args):
         g_scheduler.step()
         d_scheduler.step()
         
-        real_samples = next(iter(trainloader))[0].to(device)
-        save_gan_samples(generator, teacher_discriminator,pca_noiser, epoch, args.output_dir, device,real_samples=real_samples)
+        save_gan_samples(generator, discriminator, epoch, args.output_dir, device,real_samples=real_samples)
     
         # Save samples and model checkpoints
         if epoch % args.save_freq == 0:
@@ -454,7 +477,7 @@ def train_ebm_gan(args):
                 'd_scheduler_state_dict': d_scheduler.state_dict(),
             }, os.path.join(args.output_dir, f'ebm_gan_checkpoint_{epoch}.pth'))
 
-def save_gan_samples(generator, discriminator,pca_noiser, epoch, output_dir, device, n_samples=36,real_samples=None):
+def save_gan_samples(generator, discriminator, epoch, output_dir, device, n_samples=36,real_samples=None):
     generator.eval()
     real_samples = real_samples[:n_samples]
     batch_size = real_samples.size(0)
@@ -462,8 +485,7 @@ def save_gan_samples(generator, discriminator,pca_noiser, epoch, output_dir, dev
         
         z = discriminator.net(real_samples.detach()).squeeze()
 
-        z_noised = pca_noiser(z)
-        fake_samples,_ = generator(z_noised)
+        fake_samples,_ = generator(z)
         
         # Changed 'range' to 'value_range'
         grid = make_grid(fake_samples, nrow=6, normalize=True, value_range=(-1, 1))

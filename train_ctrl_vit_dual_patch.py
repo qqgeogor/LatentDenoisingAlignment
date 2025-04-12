@@ -468,11 +468,20 @@ def train_ebm_gan(args):
                     # Generate fake samples
                     h = discriminator.forward_feature(real_samples.detach())
                     z = h[:,0]
-                    z_up = h
-                    b,n,c = z_up.shape
+                    
+                    z_noised = pca_noiser(z)
 
-                    z_up = pca_noiser(z_up.reshape(b*n,c))
-                    z_up = z_up.reshape(b,n,c)
+
+                    b,n,c = h.shape
+
+                    # z_up = pca_noiser(z_up.reshape(b*n,c))
+                    # z_up = z_up.reshape(b,n,c)
+
+                    # Add mask tokens
+                    mask_tokens = generator.mask_token.repeat(h.shape[0],n-1, 1)
+                    z_up = torch.cat([z_noised.unsqueeze(1), mask_tokens], dim=1)
+                    z_up = z_up + generator.decoder_pos_embed
+
 
                     real_samples = real_samples.detach().requires_grad_(True)
                     
@@ -509,9 +518,15 @@ def train_ebm_gan(args):
                 # Generate new fake samples
                 h = discriminator.forward_feature(real_samples.detach())
                 z = h[:,0]
-                z_up = h
-                z_up = pca_noiser(z_up.reshape(b*n,c))
-                z_up = z_up.reshape(b,n,c)
+                z_noised = pca_noiser(z)
+                # z_up = h
+                # z_up = pca_noiser(z_up.reshape(b*n,c))
+                # z_up = z_up.reshape(b,n,c)
+                
+                 # Add mask tokens
+                mask_tokens = generator.mask_token.repeat(h.shape[0],n-1, 1)
+                z_up = torch.cat([z_noised.unsqueeze(1), mask_tokens], dim=1)
+                z_up = z_up + generator.decoder_pos_embed
                 
                 fake_samples = generator.forward_decoder(z_up)
                 fake_samples = generator.unpatchify(fake_samples)
@@ -569,10 +584,12 @@ def save_gan_samples(generator, discriminator,pca_noiser, epoch, output_dir, n_s
         
         h = discriminator.forward_feature(real_samples.detach())
         z = h[:,0]
-        z_up = h
-        b,n,c = z_up.shape
-        z_up = pca_noiser(z_up.reshape(b*n,c))
-        z_up = z_up.reshape(b,n,c)
+        z_noised = pca_noiser(z)
+        b,n,c = h.shape
+        # Add mask tokens
+        mask_tokens = generator.mask_token.repeat(h.shape[0],n-1, 1)
+        z_up = torch.cat([z_noised.unsqueeze(1), mask_tokens], dim=1)
+        z_up = z_up + generator.decoder_pos_embed
         
         fake_samples = generator.forward_decoder(z_up)
         fake_samples = generator.unpatchify(fake_samples)

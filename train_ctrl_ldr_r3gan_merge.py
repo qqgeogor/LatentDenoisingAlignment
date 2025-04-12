@@ -9,6 +9,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from torchvision.utils import make_grid
 import numpy as np
+from utils_ibot import SVDPCANoise
 from tqdm import tqdm
 import argparse
 import torch.nn.functional as F
@@ -17,6 +18,7 @@ from contextlib import nullcontext
 os.environ['MPLBACKEND'] = 'Agg'
 import matplotlib
 matplotlib.use('Agg')
+import math
 
 def zero_centered_gradient_penalty(samples, critics):
     grad, = torch.autograd.grad(outputs=critics.sum(), inputs=samples, create_graph=True)
@@ -145,64 +147,185 @@ class ResBlockDown(nn.Module):
     def forward(self, x):
         return F.relu(self.main_branch(x) + self.shortcut(x))
 
+class ModulatedConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=1):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.stride = stride
+        self.padding = padding
+
+        self.weight = nn.Parameter(torch.randn(out_channels, in_channels, kernel_size, kernel_size))
+        self.mod_scale = 1 / math.sqrt(in_channels * kernel_size ** 2)
+        # Add style projection to match input channels
+        self.style_proj = nn.Linear(512, in_channels)
+        
+    def forward(self, x, style):
+        batch, in_channels, height, width = x.shape
+        
+        # print(style.shape)
+        # Project style to match input channels
+        style = self.style_proj(style)  # [B, in_channels]
+        # print(style.shape)
+        # Modulation
+        style = style.view(batch, 1, in_channels, 1, 1)
+        weight = self.weight.unsqueeze(0)  # [1, out_ch, in_ch, k, k]
+
+        weight = weight * style * self.mod_scale
+        # print(weight.shape)
+        # Demodulation
+        demod = torch.rsqrt(weight.pow(2).sum([2, 3, 4]) + 1e-8)
+        weight = weight * demod.view(batch, self.out_channels, 1, 1, 1)
+        
+        weight = weight.view(batch * self.out_channels, in_channels, self.kernel_size, self.kernel_size)
+        x = x.view(1, batch * in_channels, height, width)
+        
+        x = F.conv2d(x, weight, padding=self.padding, stride=self.stride, groups=batch)
+        x = x.view(batch, self.out_channels, height, width)
+        
+        return x
+
+class CrossAttention(nn.Module):
+    def __init__(self, query_dim, key_dim, num_heads=8):
+        super().__init__()
+        self.num_heads = num_heads
+        self.scale = (query_dim // num_heads) ** -0.5
+        
+        self.to_q = nn.Linear(query_dim, query_dim)
+        self.to_k = nn.Linear(key_dim, query_dim)
+        self.to_v = nn.Linear(key_dim, query_dim)
+        self.to_out = nn.Linear(query_dim, query_dim)
+        
+    def forward(self, x, context):
+        b, c, h, w = x.shape
+        x_flat = x.view(b, c, -1).permute(0, 2, 1)  # B, HW, C
+        # print(x_flat.shape,context.shape)
+
+        q = self.to_q(x_flat)
+        k = self.to_k(context)
+        v = self.to_v(context)
+        
+        q, k, v = map(lambda t: t.view(b, -1, self.num_heads, c // self.num_heads).transpose(1, 2),
+                     (q, k, v))
+        
+        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        attn = F.softmax(attn, dim=-1)
+        
+        out = torch.matmul(attn, v)
+        out = out.transpose(1, 2).reshape(b, -1, c)
+        out = self.to_out(out)
+        
+        return out.permute(0, 2, 1).view(b, c, h, w)
+
+class StyleBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, up=False):
+        super().__init__()
+        self.up = up
+        self.cross_attn = CrossAttention(out_channels, out_channels*2)
+        
+        if up:
+            self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        
+        self.conv1 = ModulatedConv2d(in_channels, out_channels, 3)
+        self.conv2 = ModulatedConv2d(out_channels, out_channels, 3)
+        self.activation = nn.LeakyReLU(0.2)
+        self.norm = nn.InstanceNorm2d(out_channels)
+        
+    def forward(self, x, style, context=None):
+        if self.up:
+            x = self.upsample(x)
+            
+        x = self.conv1(x, style)
+        x = self.activation(x)
+        x = self.norm(x)
+        
+        if context is not None:
+            x = x + self.cross_attn(x, context)
+        
+        x = self.conv2(x, style)
+        x = self.activation(x)
+        x = self.norm(x)
+        
+        return x
+
+class MappingNetwork(nn.Module):
+    def __init__(self, latent_dim, style_dim, n_layers=8):
+        super().__init__()
+        layers = []
+        for i in range(n_layers):
+            layers.extend([
+                nn.Linear(latent_dim if i == 0 else style_dim, style_dim),
+                nn.LeakyReLU(0.2),
+                nn.LayerNorm(style_dim)
+            ])
+        self.net = nn.Sequential(*layers)
+        
+    def forward(self, x):
+        return self.net(x)
+
 class Decoder(nn.Module):
-    def __init__(self,latent_dim=128):
+    def __init__(self, latent_dim=128, style_dim=512):
         super().__init__()
         self.latent_dim = latent_dim
-        # Initial dense layer from 128-dim latent to 4x4x256
-        self.dense = nn.Linear(latent_dim, 4 * 4 * 256)
-        self.reshape = Reshape((256, 4, 4))
+        self.style_dim = style_dim
         
-        # Three ResBlocks with upsampling (up 256)
-        self.resblock1 = ResBlock(256, 256, up=True)  # 4x4 -> 8x8
-        self.resblock2 = ResBlock(256, 256, up=True)  # 8x8 -> 16x16
-        self.resblock3 = ResBlock(256, 256, up=True)  # 16x16 -> 32x32
+        # Mapping network for z
+        self.mapping = MappingNetwork(latent_dim, style_dim)
         
-        # Final layers: BN, ReLU, 3x3 conv, Tanh
-        self.bn = nn.BatchNorm2d(256)
-        self.relu = nn.ReLU()
-        self.final_conv = nn.Conv2d(256, 3, kernel_size=3, padding=1)
-        self.tanh = nn.Tanh()
+        # Mapping network for conditioning
+        self.cond_mapping = MappingNetwork(latent_dim, style_dim)
         
-         # Variational part
-        self.fc_mu = nn.Linear(latent_dim, latent_dim)
-        self.fc_logvar = nn.Linear(latent_dim, latent_dim)
-
-        self.projection = nn.Linear(latent_dim*2,latent_dim)
-
-
-    def kl_divergence(self, mu, logvar):
-        # KL divergence between N(mu, sigma) and N(0, 1)
-        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
-    
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        z = mu + eps * std
-        return z
-
-    def forward(self, z):
-        # mu = self.fc_mu(z)
-        # logvar = self.fc_logvar(z)
-        # z_reparam = self.reparameterize(mu,logvar)
-        # kld = self.kl_divergence(mu,logvar).mean()
-
-
-        # n = torch.randn_like(z)
-        # kld = n.mean()
+        # Initial processing
+        self.const = nn.Parameter(torch.randn(1, 256, 4, 4))
         
-        # z = self.projection(torch.cat([z,n],dim=-1))
-        kld = z.mean()
-        x = self.dense(z)
-        x = self.reshape(x)  # -> 4x4x256
-        x = self.resblock1(x)  # -> 8x8x256
-        x = self.resblock2(x)  # -> 16x16x256
-        x = self.resblock3(x)  # -> 32x32x256
-        x = self.bn(x)
-        x = self.relu(x)
-        x = self.final_conv(x)  # -> 32x32x3
-        x = self.tanh(x)
-        return x,kld
+        # StyleBlocks with increasing resolution
+        self.style_blocks = nn.ModuleList([
+            StyleBlock(256, 256, up=True),  # 4x4 -> 8x8
+            StyleBlock(256, 256, up=True),  # 8x8 -> 16x16
+            StyleBlock(256, 256, up=True),  # 16x16 -> 32x32
+        ])
+        
+        # Final layers
+        self.to_rgb = nn.Sequential(
+            nn.Conv2d(256, 3, 1, 1, 0),
+            nn.Tanh()
+        )
+        
+    def forward(self, z, c_emb=None):
+        batch_size = z.shape[0]
+        
+        # Map latent vectors to styles
+        w = self.mapping(z)
+        
+        
+        # Process conditioning if provided
+        if c_emb is not None:
+            if c_emb.shape[0] != batch_size:
+                if c_emb.shape[0] == 1:
+                    c_emb = c_emb.repeat(batch_size, 1)
+                else:
+                    raise ValueError("Batch size mismatch between z and c_emb")
+            
+            context = self.cond_mapping(c_emb)
+        else:
+            context = None
+        
+        # # Start from learned constant
+        x = self.const.repeat(batch_size, 1, 1, 1)
+        # print(w.shape)
+        # print(x.shape)
+        
+        # Apply style blocks with cross attention
+        for style_block in self.style_blocks:
+            x = style_block(x, w, context)
+        
+        # Convert to RGB
+        x = self.to_rgb(x)
+        
+        # Return image and placeholder KLD (for compatibility)
+        return x, w.mean() * 0
+
 # Now let's update the Encoder and Decoder with these specific ResBlock implementations:
 
 class Encoder(nn.Module):
@@ -250,23 +373,25 @@ class Encoder(nn.Module):
         x = self.head(x)
         return x
     
-    
 
 # Modify training function
 def train_ebm_gan(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-
+    
     # Initialize AMP scaler
     scaler = GradScaler()
-
-    # Data preprocessing
+    
     transform = transforms.Compose([
+        transforms.RandomResizedCrop(32, scale=(0.2, 1.0)),
         transforms.RandomHorizontalFlip(),
+        transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+        transforms.RandomGrayscale(p=0.2),
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], 
+                            std=[0.5, 0.5, 0.5])
     ])
-
+    
     # Load CIFAR-10
     trainset = torchvision.datasets.CIFAR10(root=args.data_path, train=True,
                                           download=True, transform=transform)
@@ -282,15 +407,17 @@ def train_ebm_gan(args):
                            shuffle=True, num_workers=args.num_workers)
 
     # Initialize models
-    dummy_discriminator = Encoder(latent_dim=args.latent_dim).to(device)
-    
     generator = Decoder(latent_dim=args.latent_dim).to(device)
     # discriminator = ResNetEnergyNet(img_channels=3, hidden_dim=64).to(device)
     discriminator = Encoder(latent_dim=args.latent_dim).to(device)
+    teacher_discriminator = Encoder(latent_dim=args.latent_dim).to(device)
+    
+    checkpoint = torch.load('../../autodl-tmp/output_cl_dino_all/ebm_gan_checkpoint_1000.pth')
+    teacher_discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
     
     # Optimizers
     g_optimizer = torch.optim.AdamW(
-        list(generator.parameters())+list(discriminator.parameters()), 
+        generator.parameters(), 
         lr=args.g_lr, 
         betas=(args.g_beta1, args.g_beta2)
     )
@@ -312,7 +439,7 @@ def train_ebm_gan(args):
         eta_min=args.min_lr
     )
     start_epoch = 0
-    
+    pca_noiser = SVDPCANoise(noise_scale=0.5,kernel='linear',gamma=1.0)
     # Add checkpoint loading logic
     if args.resume:
         checkpoint_path = args.resume
@@ -332,7 +459,7 @@ def train_ebm_gan(args):
     for epoch in range(start_epoch,args.epochs):
         generator.train()
         discriminator.train()
-        dummy_discriminator.train()
+        teacher_discriminator.eval()
         
         for i, (real_samples, _) in enumerate(tqdm(trainloader)):
             batch_size = real_samples.size(0)
@@ -343,11 +470,16 @@ def train_ebm_gan(args):
                 d_optimizer.zero_grad()
                 
                 with autocast() if args.use_amp else nullcontext():
-                    # Generate fake samples
-                    z = discriminator.net(real_samples.detach()).squeeze()
-
+                    # # Generate fake samples
+                    # with torch.no_grad():
+                    #     z = teacher_discriminator.net(real_samples.detach()).squeeze()
+                    #     z = z.detach()
+                    z = torch.ones(real_samples.shape[0],384).to(device)
                     real_samples = real_samples.detach().requires_grad_(True)
-                    fake_samples,_ = generator(z)
+                    
+                    z_noised = torch.randn_like(z)
+                    
+                    fake_samples,_ = generator(z_noised)
                     fake_samples = fake_samples.detach().requires_grad_(True)
                     # Compute energies
                     real_energy = discriminator(real_samples)
@@ -357,14 +489,13 @@ def train_ebm_gan(args):
                     d_loss = F.softplus(-realistic_logits)
 
                     loss_tcr = -R(z).mean()
-                    loss_tcr /=200
-
+                    loss_tcr /=384
+                    
                     r1 = zero_centered_gradient_penalty(real_samples, real_energy)
                     r2 = zero_centered_gradient_penalty(fake_samples, fake_energy)
 
                     d_loss = d_loss + args.gp_weight/2 * (r1 + r2)
-                    d_loss = d_loss.mean() + loss_tcr
-                
+                    d_loss = d_loss.mean() #+ loss_tcr
                 if args.use_amp:
                     scaler.scale(d_loss).backward()
                     scaler.step(d_optimizer)
@@ -372,30 +503,24 @@ def train_ebm_gan(args):
                 else:
                     d_loss.backward()
                     d_optimizer.step()
-
             # Train Generator
             g_optimizer.zero_grad()
             
             with autocast() if args.use_amp else nullcontext():
                 # Generate new fake samples
-                z = discriminator.net(real_samples.detach()).squeeze()
-                fake_samples,loss_kld = generator(z)
 
-                ## dummy_discriminator takes discriminator's parameters
-                dummy_discriminator.load_state_dict(discriminator.state_dict())
-                
-                
-                fake_energy = dummy_discriminator(fake_samples)
-                real_energy = dummy_discriminator(real_samples)
-                z_fake = discriminator.net(fake_samples).squeeze()
-                
+                z_noised = torch.randn_like(z)
+                fake_samples,loss_kld = generator(z_noised)
+                fake_energy = discriminator(fake_samples)
+                real_energy = discriminator(real_samples)
+                z_fake = teacher_discriminator.net(fake_samples).squeeze()
+
                 loss_cos = 1 - F.cosine_similarity(z_fake,z,dim=-1).mean()
                 loss_mse = F.mse_loss(fake_samples,real_samples).mean()
 
                 realistic_logits = fake_energy - real_energy
                 g_loss = F.softplus(-realistic_logits)
                 g_loss = g_loss.mean() #+ loss_cos # + loss_kld 
-            
             if args.use_amp:
                 scaler.scale(g_loss).backward()
                 scaler.step(g_optimizer)
@@ -403,8 +528,7 @@ def train_ebm_gan(args):
             else:
                 g_loss.backward()
                 g_optimizer.step()
-            
-            
+
             if i % args.log_freq == 0:
                 current_g_lr = g_optimizer.param_groups[0]['lr']
                 current_d_lr = d_optimizer.param_groups[0]['lr']
@@ -425,8 +549,8 @@ def train_ebm_gan(args):
         d_scheduler.step()
         
         real_samples = next(iter(trainloader))[0].to(device)
-        save_gan_samples(generator, discriminator, epoch, args.output_dir, device,real_samples=real_samples)
-
+        save_gan_samples(generator, teacher_discriminator,pca_noiser, epoch, args.output_dir, device,real_samples=real_samples)
+    
         # Save samples and model checkpoints
         if epoch % args.save_freq == 0:
             torch.save({
@@ -439,16 +563,18 @@ def train_ebm_gan(args):
                 'd_scheduler_state_dict': d_scheduler.state_dict(),
             }, os.path.join(args.output_dir, f'ebm_gan_checkpoint_{epoch}.pth'))
 
-def save_gan_samples(generator, discriminator, epoch, output_dir, device, n_samples=36,real_samples=None):
+def save_gan_samples(generator, teacher_discriminator,pca_noiser, epoch, output_dir, device, n_samples=36,real_samples=None):
     generator.eval()
-    discriminator.eval()
+    teacher_discriminator.eval()
     real_samples = real_samples[:n_samples]
     batch_size = real_samples.size(0)
     with torch.no_grad():
         
-        z = discriminator.net(real_samples.detach()).squeeze()
+        z = teacher_discriminator.net(real_samples.detach()).squeeze()
 
-        fake_samples,_ = generator(z)
+        # z_noised = pca_noiser(z)
+        z_noised = torch.randn_like(z)
+        fake_samples,_ = generator(z_noised,z)
         
         # Changed 'range' to 'value_range'
         grid = make_grid(fake_samples, nrow=6, normalize=True, value_range=(-1, 1))
@@ -469,7 +595,6 @@ def save_gan_samples(generator, discriminator, epoch, output_dir, device, n_samp
 
         plt.close()
     generator.train()
-    discriminator.train()
 
 def compute_gradient_penalty(discriminator, real_samples, fake_samples, device):
     """Compute gradient penalty for improved training stability"""
