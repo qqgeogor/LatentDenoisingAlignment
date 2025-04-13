@@ -161,3 +161,12 @@ python finetune_ctrl_vit_knn.py \
     --pretrained_path ../../autodl-tmp/output_ctrl_vit/ebm_gan_checkpoint_10.pth \
     --visualize_features
     
+
+
+
+python finetune_ctrl_ldr_vae_knn.py \
+    --latent_dim 384     \
+    --use_amp     \
+    --pretrained_path /mnt/d/repo/output/ctrl-ldr-ema-cos-cl-temp01/ebm_gan_checkpoint_10.pth \
+    --visualize_features
+    

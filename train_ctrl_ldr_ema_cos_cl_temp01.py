@@ -262,8 +262,8 @@ def train_ebm_gan(args):
     print(f"Using device: {device}")
     
     # Initialize AMP scaler
-    scaler = GradScaler()
-    
+    d_scaler = GradScaler()
+    g_scaler = GradScaler()
     transform = transforms.Compose([
         transforms.RandomResizedCrop(32, scale=(0.2, 1.0)),
         transforms.RandomHorizontalFlip(),
@@ -417,9 +417,9 @@ def train_ebm_gan(args):
                     d_loss = d_loss + args.gp_weight/2 * (r1 + r2)
                     d_loss = d_loss.mean()*args.adv_weight + loss_dino
                 if args.use_amp:
-                    scaler.scale(d_loss).backward()
-                    scaler.step(d_optimizer)
-                    scaler.update()
+                    d_scaler.scale(d_loss).backward()
+                    d_scaler.step(d_optimizer)
+                    d_scaler.update()
                 else:
                     d_loss.backward()
                     d_optimizer.step()
@@ -459,9 +459,9 @@ def train_ebm_gan(args):
 
                 g_loss = g_loss.mean()*args.adv_weight + loss_tgr
             if args.use_amp:
-                scaler.scale(g_loss).backward()
-                scaler.step(g_optimizer)
-                scaler.update()
+                g_scaler.scale(g_loss).backward()
+                g_scaler.step(g_optimizer)
+                g_scaler.update()
             else:
                 g_loss.backward()
                 g_optimizer.step()
