@@ -294,8 +294,8 @@ def train_ebm_gan(args):
     generator = Decoder(latent_dim=args.latent_dim).to(device)
     discriminator = Encoder(latent_dim=args.latent_dim).to(device)
     teacher_discriminator = Encoder(latent_dim=args.latent_dim).to(device)
-    checkpoint = torch.load('../../autodl-tmp/output_cl_dino_all/ebm_gan_checkpoint_1000.pth')
-    teacher_discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+    # checkpoint = torch.load('../../autodl-tmp/output_cl_dino_all/ebm_gan_checkpoint_1000.pth')
+    # teacher_discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
     
     # Optimizers
     g_optimizer = torch.optim.AdamW(
@@ -415,7 +415,7 @@ def train_ebm_gan(args):
                     r2 = zero_centered_gradient_penalty(fake_samples, fake_energy)
                     
                     d_loss = d_loss + args.gp_weight/2 * (r1 + r2)
-                    d_loss = d_loss.mean() + loss_dino
+                    d_loss = d_loss.mean()*args.adv_weight + loss_dino
                 if args.use_amp:
                     scaler.scale(d_loss).backward()
                     scaler.step(d_optimizer)
@@ -457,7 +457,7 @@ def train_ebm_gan(args):
 
 
 
-                g_loss = g_loss.mean() + loss_tgr
+                g_loss = g_loss.mean()*args.adv_weight + loss_tgr
             if args.use_amp:
                 scaler.scale(g_loss).backward()
                 scaler.step(g_optimizer)
@@ -567,6 +567,8 @@ def get_args_parser():
     
     parser.add_argument('--cls', default=-1, type=int,
                         help='Class to train on')
+    parser.add_argument('--adv_weight', default=1.0, type=float,
+                        help='Weight of adversarial loss')
     
     # Existing parameters
     parser.add_argument('--epochs', default=1200, type=int)
