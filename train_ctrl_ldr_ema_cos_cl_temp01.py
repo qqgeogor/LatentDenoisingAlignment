@@ -567,7 +567,7 @@ def get_args_parser():
     
     parser.add_argument('--cls', default=-1, type=int,
                         help='Class to train on')
-    parser.add_argument('--adv_weight', default=1.0, type=float,
+    parser.add_argument('--adv_weight', default=0.1, type=float,
                         help='Weight of adversarial loss')
     
     # Existing parameters
