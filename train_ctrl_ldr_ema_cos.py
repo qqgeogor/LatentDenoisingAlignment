@@ -373,39 +373,47 @@ def train_ebm_gan(args):
                     real_samples = real_samples.detach().requires_grad_(True)
 
                     z = discriminator.net(real_samples).squeeze()
+                    z2 = discriminator.net(aug_samples).squeeze()
                     with torch.no_grad():
-                        z_anchor = teacher_discriminator.net(aug_samples.detach()).squeeze()
+                        z_anchor = discriminator.net(aug_samples.detach()).squeeze()
                         z_anchor = z_anchor.detach()
+
+
+                        z_anchor2 = discriminator.net(real_samples.detach()).squeeze()
+                        z_anchor2 = z_anchor2.detach()
+
                     
                     
-                    # anchor_samples,_ = generator(z_anchor)
+                    # z = pca_noiser(z)
                     fake_samples,_ = generator(z)
                     fake_samples = fake_samples.detach().requires_grad_(True)
                     
                     z_fake = discriminator.net(fake_samples).squeeze()
-
+                    
                     
                     real_energy = F.cosine_similarity(z,z_anchor,dim=-1)
-                    fake_energy = F.cosine_similarity(z_fake,z.detach(),dim=-1)
+                    real_energy2 = F.cosine_similarity(z2,z_anchor2,dim=-1)
+                    real_energy = real_energy + real_energy2
+                    real_energy /=2
 
-                    realistic_logits = real_energy - fake_energy
-
+                    fake_energy = F.cosine_similarity(z_fake,z_anchor,dim=-1)
                     
-                    d_loss = F.softplus(-realistic_logits)
 
-
-
-
-                    d_loss = d_loss 
+                    realistic_logits = real_energy.detach() - fake_energy
                     
-                    loss_tcr = -R(z).mean()
+                    
+                    d_loss = F.softplus(-realistic_logits/args.temperature)
+                    
+                    
+                    
+                    loss_tcr = -0.5*(R(z).mean()+R(z2).mean())
                     loss_tcr /=200
                     
                     r1 = zero_centered_gradient_penalty(real_samples, real_energy)
                     r2 = zero_centered_gradient_penalty(fake_samples, fake_energy)
 
                     d_loss = d_loss + args.gp_weight/2 * (r1 + r2)
-                    d_loss = d_loss.mean() + loss_tcr
+                    d_loss = d_loss.mean() + loss_tcr + (1-real_energy).mean()
                 if args.use_amp:
                     scaler.scale(d_loss).backward()
                     scaler.step(d_optimizer)
@@ -422,28 +430,46 @@ def train_ebm_gan(args):
             g_optimizer.zero_grad()
             
             with autocast() if args.use_amp else nullcontext():
-                # Generate new fake samples
-                z = z.detach()
+
                 z = discriminator.net(real_samples).squeeze()
+                z2 = discriminator.net(aug_samples).squeeze()
+                with torch.no_grad():
+                    z_anchor = discriminator.net(aug_samples.detach()).squeeze()
+                    z_anchor = z_anchor.detach()
+
+
+                    z_anchor2 = discriminator.net(real_samples.detach()).squeeze()
+                    z_anchor2 = z_anchor2.detach()
+
                 
+                
+                # z = pca_noiser(z)
                 fake_samples,_ = generator(z)
-
+                fake_samples2,_ = generator(z2)
+                
                 z_fake = discriminator.net(fake_samples).squeeze()
-
+                z_fake2 = discriminator.net(fake_samples2).squeeze()
+                
                 
                 real_energy = F.cosine_similarity(z,z_anchor,dim=-1)
-                fake_energy = F.cosine_similarity(z_fake,z.detach(),dim=-1)
+                real_energy2 = F.cosine_similarity(z2,z_anchor2,dim=-1)
+                real_energy = real_energy + real_energy2
+                real_energy /=2
 
-                loss_tgr = -R(z_fake).mean()
+                fake_energy = F.cosine_similarity(z_fake,z_anchor,dim=-1)
+                fake_energy2 = F.cosine_similarity(z_fake2,z_anchor2,dim=-1)
+                fake_energy = fake_energy + fake_energy2
+                fake_energy /=2
+
+                loss_tgr = -0.5*(R(z_fake).mean()+R(z_fake2).mean())
                 loss_tgr /=200
                 
 
                 realistic_logits = fake_energy - real_energy
-                g_loss = F.softplus(-realistic_logits)
+                g_loss = F.softplus(-realistic_logits/args.temperature)
 
 
-
-                g_loss = g_loss.mean() 
+                g_loss = g_loss.mean() + loss_tgr
             if args.use_amp:
                 scaler.scale(g_loss).backward()
                 scaler.step(g_optimizer)
@@ -492,8 +518,8 @@ def save_gan_samples(generator, discriminator,pca_noiser, epoch, output_dir, dev
         
         z = discriminator.net(real_samples.detach()).squeeze()
 
-        z_noised = pca_noiser(z)
-        fake_samples,_ = generator(z_noised)
+        # z_noised = pca_noiser(z)
+        fake_samples,_ = generator(z)
         
         # Changed 'range' to 'value_range'
         grid = make_grid(fake_samples, nrow=6, normalize=True, value_range=(-1, 1))
@@ -551,6 +577,8 @@ def get_args_parser():
                         help='Beta1 for generator optimizer')
     parser.add_argument('--g_beta2', default=0.999, type=float,
                         help='Beta2 for generator optimizer')
+    parser.add_argument('--temperature', default=1.0, type=float,
+                        help='Temperature for softplus')
     
     parser.add_argument('--cls', default=-1, type=int,
                         help='Class to train on')

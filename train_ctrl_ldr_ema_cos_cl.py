@@ -331,8 +331,8 @@ def train_ebm_gan(args):
     )
     
     momentum_scheduler = cosine_scheduler(
-        base_value=0.996, final_value=1., 
-        epochs=args.epochs, niter_per_ep=len(trainloader), warmup_epochs=0, start_warmup_value=0.9994)
+        base_value=args.ema_weight_start, final_value=args.ema_weight_end, 
+        epochs=args.epochs, niter_per_ep=len(trainloader))
 
     start_epoch = 0
     pca_noiser = SVDPCANoise(noise_scale=0.5,kernel='linear',gamma=1.0)
@@ -453,9 +453,7 @@ def train_ebm_gan(args):
                 realistic_logits = fake_energy - real_energy
                 g_loss = F.softplus(-realistic_logits/args.temperature)
 
-
-
-                g_loss = g_loss.mean() 
+                g_loss = g_loss.mean() + loss_tgr
             if args.use_amp:
                 scaler.scale(g_loss).backward()
                 scaler.step(g_optimizer)
@@ -565,6 +563,11 @@ def get_args_parser():
                         help='Beta2 for generator optimizer')
     parser.add_argument('--temperature', default=1.0, type=float,
                         help='Temperature for softplus')
+    
+    parser.add_argument('--ema_weight_start', default=0.9, type=float,
+                        help='EMA weight start')
+    parser.add_argument('--ema_weight_end', default=1., type=float,
+                        help='EMA weight end')
     
     parser.add_argument('--cls', default=-1, type=int,
                         help='Class to train on')
