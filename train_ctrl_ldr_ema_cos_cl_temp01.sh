@@ -3,4 +3,5 @@ python train_ctrl_ldr_ema_cos_cl_temp01.py     \
     --output_dir ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_temp01     \
     --save_freq 10    \
     --batch_size 128    \
-    --latent_dim 384 
+    --latent_dim 384 \
+    --adv_weight 0.1
