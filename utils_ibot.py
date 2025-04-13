@@ -358,11 +358,9 @@ class SVDPCANoise(nn.Module):
         return (x_components @ self.ema_eig_vecs.T).reshape(B, N, C)
 
     def forward(self, x, return_patches=False):
-        if not self.training:
-            return x
-
+        
         B, C = x.shape
-
+        
         # Flatten all patches across batch and spatial dimensions
         all_patches = x  # (B*num_patches_total, C*p*p)
         

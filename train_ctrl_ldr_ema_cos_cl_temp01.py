@@ -18,6 +18,7 @@ from contextlib import nullcontext
 os.environ['MPLBACKEND'] = 'Agg'
 import matplotlib
 matplotlib.use('Agg')
+from utils_ibot import SVDPCANoise
 
 
 def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epochs=0, start_warmup_value=0):
@@ -327,6 +328,8 @@ def train_ebm_gan(args):
 
     start_epoch = 0
     
+    
+    pca_noiser = SVDPCANoise(noise_scale=args.noise_scale, kernel='linear', gamma=1.0) if args.noise_scale>0 else nn.Identity()
     # Add checkpoint loading logic
     if args.resume:
         checkpoint_path = args.resume
@@ -386,7 +389,8 @@ def train_ebm_gan(args):
                     real_samples = real_samples.detach().requires_grad_(True)
                     z = discriminator.net(real_samples).squeeze()
                     
-                    fake_samples,_ = generator(z)
+                    z_noised = pca_noiser(z)
+                    fake_samples,_ = generator(z_noised)
                     fake_samples = fake_samples.detach().requires_grad_(True)
                     
                     z_fake = discriminator.net(fake_samples).squeeze()
@@ -438,7 +442,9 @@ def train_ebm_gan(args):
                     z_anchor = z_anchor.detach()
                     
 
-                fake_samples,_ = generator(z)
+                    
+                z_noised = pca_noiser(z)
+                fake_samples,_ = generator(z_noised)
 
                 z_fake = discriminator.net(fake_samples).squeeze()
 
@@ -483,7 +489,7 @@ def train_ebm_gan(args):
         g_scheduler.step()
         d_scheduler.step()
         
-        save_gan_samples(generator, discriminator, epoch, args.output_dir, device,real_samples=real_samples)
+        save_gan_samples(generator, discriminator, epoch, args.output_dir, device,real_samples=real_samples,pca_noiser=pca_noiser)
     
         # Save samples and model checkpoints
         if epoch % args.save_freq == 0:
@@ -498,15 +504,15 @@ def train_ebm_gan(args):
                 'd_scheduler_state_dict': d_scheduler.state_dict(),
             }, os.path.join(args.output_dir, f'ebm_gan_checkpoint_{epoch}.pth'))
 
-def save_gan_samples(generator, discriminator, epoch, output_dir, device, n_samples=36,real_samples=None):
+def save_gan_samples(generator, discriminator, epoch, output_dir, device, n_samples=36,real_samples=None,pca_noiser=None):
     generator.eval()
     real_samples = real_samples[:n_samples]
     batch_size = real_samples.size(0)
     with torch.no_grad():
         
         z = discriminator.net(real_samples.detach()).squeeze()
-
-        fake_samples,_ = generator(z)
+        z_noised = pca_noiser(z)
+        fake_samples,_ = generator(z_noised)
         
         # Changed 'range' to 'value_range'
         grid = make_grid(fake_samples, nrow=6, normalize=True, value_range=(-1, 1))
@@ -557,6 +563,8 @@ def get_args_parser():
     parser.add_argument('--n_critic', default=1, type=int,
                         help='Number of discriminator updates per generator update')
     parser.add_argument('--gp_weight', default=0.05, type=float,
+                        help='Weight of gradient penalty')
+    parser.add_argument('--noise_scale', default=0.0, type=float,
                         help='Weight of gradient penalty')
     
     # Modify learning rates

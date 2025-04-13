@@ -9,94 +9,50 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from torchvision.utils import make_grid
 import numpy as np
+
 from tqdm import tqdm
 import argparse
 import torch.nn.functional as F
+from contextlib import nullcontext
 # Set matplotlib backend to avoid GUI dependencies
 os.environ['MPLBACKEND'] = 'Agg'
 import matplotlib
 matplotlib.use('Agg')
+from utils_ibot import SVDPCANoise
+
+
+def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epochs=0, start_warmup_value=0):
+    warmup_schedule = np.array([])
+    warmup_iters = warmup_epochs * niter_per_ep
+    if warmup_epochs > 0:
+        warmup_schedule = np.linspace(start_warmup_value, base_value, warmup_iters)
+
+    iters = np.arange(epochs * niter_per_ep - warmup_iters)
+    schedule = final_value + 0.5 * (base_value - final_value) * (1 + np.cos(np.pi * iters / len(iters)))
+
+    schedule = np.concatenate((warmup_schedule, schedule))
+    assert len(schedule) == epochs * niter_per_ep
+    return schedule
+
 
 def zero_centered_gradient_penalty(samples, critics):
     grad, = torch.autograd.grad(outputs=critics.sum(), inputs=samples, create_graph=True)
     return grad.square().sum([1, 2, 3])
 
-class EnergyNet(nn.Module):
-    def __init__(self, img_channels=3, hidden_dim=64):
-        super().__init__()
-        
-        self.net = nn.Sequential(
-            # Initial conv: [B, 3, 32, 32] -> [B, 64, 16, 16]
-            nn.Conv2d(img_channels, hidden_dim, 4, 2, 1),
-            # nn.GroupNorm(8, hidden_dim),  # Add normalization
-            nn.LeakyReLU(0.2),
-            
-            # [B, 64, 16, 16] -> [B, 128, 8, 8]
-            nn.Conv2d(hidden_dim, hidden_dim * 2, 4, 2, 1),
-            # nn.GroupNorm(8, hidden_dim * 2),  # Add normalization
-            nn.LeakyReLU(0.2),
-            
-            # [B, 128, 8, 8] -> [B, 256, 4, 4]
-            nn.Conv2d(hidden_dim * 2, hidden_dim * 4, 4, 2, 1),
-            # nn.GroupNorm(8, hidden_dim * 4),  # Add normalization
-            nn.LeakyReLU(0.2),
-            
-            # [B, 256, 4, 4] -> [B, 512, 2, 2]
-            nn.Conv2d(hidden_dim * 4, hidden_dim * 8, 4, 2, 1),
-            # nn.GroupNorm(8, hidden_dim * 8),  # Add normalization
-            nn.LeakyReLU(0.2),
-            
-            # Final conv to scalar energy: [B, 512, 2, 2] -> [B, 1, 1, 1]
-            nn.Conv2d(hidden_dim * 8, 128, 2, 1, 0)
-        )
 
-        self.head = nn.Linear(128, 1)
-        
-        # Initialize weights properly
-        self.apply(self._init_weights)
+# Add MultiViewTransform class
+class MultiViewTransform:
     
-    def _init_weights(self, m):
-        if isinstance(m, nn.Conv2d):
-            nn.init.orthogonal_(m.weight.data)
-            if m.bias is not None:
-                nn.init.constant_(m.bias.data, 0)
-    
-    def forward(self, x):
-        z = self.net(x).squeeze()
-        logits = self.head(z)
-        # print(x.shape)
-        # logits = self.head(logits)
-        # Add regularization term to prevent collapse
-        # reg_term = 0.1 * (logits ** 2).mean()
-        # logits = logits# + reg_term
-        #logits = -F.logsigmoid(logits)
-        return logits
+    def __init__(self, base_transform,n_views=20):
+        self.n_views = n_views
+        self.base_transform = base_transform
 
+    def __call__(self, x):
+        views = []
+        for _ in range(self.n_views):
+            views.append(self.base_transform(x))
 
-class ResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, stride, 1)
-        self.gn1 = nn.GroupNorm(8, out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, 1, 1)
-        self.gn2 = nn.GroupNorm(8, out_channels)
-        
-        # Shortcut connection
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_channels != out_channels:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, 1, stride),
-                nn.GroupNorm(8, out_channels)
-            )
-    
-    def forward(self, x):
-        out = F.leaky_relu(self.gn1(self.conv1(x)), 0.2)
-        out = self.gn2(self.conv2(out))
-        out += self.shortcut(x)
-        out = F.leaky_relu(out, 0.2)
-        return out
-
-
+        return views
 def R(Z,eps=0.5):
     c = Z.shape[-1]
     b = Z.shape[-2]
@@ -126,114 +82,7 @@ def R_nonorm(Z,eps=0.5):
     out = 0.5*torch.logdet(cov)
     return out.mean()
 
-def mcr(Z1,Z2):
-    return R(torch.cat([Z1,Z2],dim=0))-0.5*R(Z1)-0.5*R(Z2)
 
-
-
-# Add SimSiam loss function
-def simsiam_loss(p1, p2, h1, h2):
-
-    loss_tcr = -R(p1).mean()
-    loss_tcr *=1e-2
-
-    # Negative cosine similarity
-    loss_cos = (F.cosine_similarity(h1, p2.detach(), dim=-1).mean() + 
-             F.cosine_similarity(h2, p1.detach(), dim=-1).mean()) * 0.5
-    
-    loss_cos = 1-loss_cos
-
-    return loss_cos,loss_tcr
-
-def tcr_loss(Z1,Z2):
-    Z1 = F.normalize(Z1,p=2,dim=-1)
-    Z2 = F.normalize(Z2,p=2,dim=-1)
-    Z = (Z1+Z2)/2
-    return R_nonorm(Z)
-
-
-class ResNetEnergyNet(nn.Module):
-    def __init__(self, img_channels=3, hidden_dim=64):
-        super().__init__()
-        
-        # Initial conv layer
-        self.initial = nn.Sequential(
-            nn.Conv2d(img_channels, hidden_dim, 3, 1, 1),
-            nn.GroupNorm(8, hidden_dim),
-            nn.LeakyReLU(0.2)
-        )
-        
-        # ResNet blocks with downsampling
-        self.layer1 = ResBlock(hidden_dim, hidden_dim * 2, stride=2)
-        self.layer2 = ResBlock(hidden_dim * 2, hidden_dim * 4, stride=2)
-        self.layer3 = ResBlock(hidden_dim * 4, hidden_dim * 8, stride=2)
-        self.layer4 = ResBlock(hidden_dim * 8, hidden_dim * 8, stride=2)
-        
-        # Final energy output
-        self.energy_head = nn.Sequential(
-            nn.Conv2d(hidden_dim * 8, hidden_dim * 4, 2, 1, 0),
-            nn.GroupNorm(8, hidden_dim * 4),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(hidden_dim * 4, 1, 1, 1, 0)
-        )
-        
-        # Initialize weights
-        self.apply(self._init_weights)
-    
-    def _init_weights(self, m):
-        if isinstance(m, nn.Conv2d):
-            nn.init.orthogonal_(m.weight.data)
-            if m.bias is not None:
-                nn.init.constant_(m.bias.data, 0)
-    
-    def forward(self, x):
-        x = self.initial(x)
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-        logits = self.energy_head(x).squeeze()
-        energy = -F.logsigmoid(logits)
-        return energy
-    
-class LangevinSampler:
-    def __init__(self, n_steps=60, step_size=10.0, noise_scale=0.005):
-        self.n_steps = n_steps
-        self.step_size = step_size
-        self.noise_scale = noise_scale
-    
-    def sample(self, model, x_init, return_trajectory=False):
-        model.eval()
-        # Ensure x requires gradients
-        x = x_init.clone().detach().requires_grad_(True)
-        trajectory = [x.clone().detach()] if return_trajectory else None
-        
-        for _ in range(self.n_steps):
-            # Ensure x requires gradients at each step
-            if not x.requires_grad:
-                x.requires_grad_(True)
-                
-            # Compute energy gradient
-            energy = model(x)
-            if isinstance(energy, torch.Tensor):
-                energy = energy.sum()
-            
-            # Compute gradients
-            if x.grad is not None:
-                x.grad.zero_()
-            grad = torch.autograd.grad(energy, x, create_graph=False, retain_graph=True)[0]
-            
-            # Langevin dynamics update
-            noise = torch.randn_like(x) * self.noise_scale
-            x = x.detach()  # Detach from computation graph
-            x = x - self.step_size * grad + noise  # Update x
-            x.requires_grad_(True)  # Re-enable gradients
-            x = torch.clamp(x, -1, 1)  # Keep samples in valid range
-            
-            if return_trajectory:
-                trajectory.append(x.clone().detach())
-        
-        return (x.detach(), trajectory) if return_trajectory else x.detach()
 
 # Add a proper reshape layer
 class Reshape(nn.Module):
@@ -244,66 +93,190 @@ class Reshape(nn.Module):
     def forward(self, x):
         return x.view(x.size(0), *self.shape)
 
-# Add Generator class
-class Generator(nn.Module):
-    def __init__(self, latent_dim=100, hidden_dim=64):
+class ResBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1, up=False):
         super().__init__()
-        self.net = nn.Sequential(
-            # Initial projection
-            nn.Linear(latent_dim, hidden_dim * 8 * 4 * 4),
-            nn.LeakyReLU(0.2),
+        
+        self.up = up
+        
+        # Main branch
+        layers = []
+        if up:
+            layers.append(nn.Upsample(scale_factor=2, mode='nearest'))
             
-            # Reshape layer instead of lambda
-            Reshape((hidden_dim * 8, 4, 4)),
-            
-            # [4x4] -> [8x8]
-            nn.ConvTranspose2d(hidden_dim * 8, hidden_dim * 4, 4, 2, 1),
-            nn.BatchNorm2d(hidden_dim * 4),
-            nn.LeakyReLU(0.2),
-            
-            # [8x8] -> [16x16]
-            nn.ConvTranspose2d(hidden_dim * 4, hidden_dim * 2, 4, 2, 1),
-            nn.BatchNorm2d(hidden_dim * 2),
-            nn.LeakyReLU(0.2),
-            
-            # [16x16] -> [32x32]
-            nn.ConvTranspose2d(hidden_dim * 2, hidden_dim, 4, 2, 1),
-            nn.BatchNorm2d(hidden_dim),
-            nn.LeakyReLU(0.2),
-            
-            # Final layer
-            nn.ConvTranspose2d(hidden_dim, 3, 3, 1, 1),
-            nn.Tanh()
+        layers.extend([
+            nn.Conv2d(in_channels, out_channels, 3, stride=1, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, 3, stride=1, padding=1),
+            nn.BatchNorm2d(out_channels)
+        ])
+        
+        self.main_branch = nn.Sequential(*layers)
+        
+        # Shortcut branch
+        shortcut_layers = []
+        if up:
+            shortcut_layers.append(nn.Upsample(scale_factor=2, mode='nearest'))
+        if in_channels != out_channels or stride != 1:
+            shortcut_layers.append(nn.Conv2d(in_channels, out_channels, 1, stride=1))
+            shortcut_layers.append(nn.BatchNorm2d(out_channels))
+        
+        self.shortcut = nn.Sequential(*shortcut_layers) if shortcut_layers else nn.Identity()
+        
+    def forward(self, x):
+        identity = self.shortcut(x)
+        out = self.main_branch(x)
+        return F.relu(out + identity)
+
+class ResBlockDown(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        
+        # Main branch
+        self.main_branch = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, stride=2, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, 3, stride=1, padding=1),
+            nn.BatchNorm2d(out_channels)
         )
         
-        self.apply(self._init_weights)
+        # Shortcut branch with downsampling
+        self.shortcut = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 1, stride=2),
+            nn.BatchNorm2d(out_channels)
+        )
     
-    def _init_weights(self, m):
-        if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d, nn.Linear)):
-            nn.init.orthogonal_(m.weight)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-                
-    def forward(self, z):
-        
+    def forward(self, x):
+        return F.relu(self.main_branch(x) + self.shortcut(x))
 
-        return self.net(z)
+class Decoder(nn.Module):
+    def __init__(self,latent_dim=128):
+        super().__init__()
+        self.latent_dim = latent_dim
+        # Initial dense layer from 128-dim latent to 4x4x256
+        self.dense = nn.Linear(latent_dim, 4 * 4 * 256)
+        self.reshape = Reshape((256, 4, 4))
+        
+        # Three ResBlocks with upsampling (up 256)
+        self.resblock1 = ResBlock(256, 256, up=True)  # 4x4 -> 8x8
+        self.resblock2 = ResBlock(256, 256, up=True)  # 8x8 -> 16x16
+        self.resblock3 = ResBlock(256, 256, up=True)  # 16x16 -> 32x32
+        
+        # Final layers: BN, ReLU, 3x3 conv, Tanh
+        self.bn = nn.BatchNorm2d(256)
+        self.relu = nn.ReLU()
+        self.final_conv = nn.Conv2d(256, 3, kernel_size=3, padding=1)
+        self.tanh = nn.Tanh()
+        
+         # Variational part
+        self.fc_mu = nn.Linear(latent_dim, latent_dim)
+        self.fc_logvar = nn.Linear(latent_dim, latent_dim)
+
+        self.projection = nn.Linear(latent_dim*2,latent_dim)
+
+
+    def kl_divergence(self, mu, logvar):
+        # KL divergence between N(mu, sigma) and N(0, 1)
+        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
+    
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+        return z
+
+    def forward(self, z):
+        # mu = self.fc_mu(z)
+        # logvar = self.fc_logvar(z)
+        # z_reparam = self.reparameterize(mu,logvar)
+        # kld = self.kl_divergence(mu,logvar).mean()
+
+
+        # n = torch.randn_like(z)
+        # kld = n.mean()
+        
+        # z = self.projection(torch.cat([z,n],dim=-1))
+        kld = z.mean()
+        x = self.dense(z)
+        x = self.reshape(x)  # -> 4x4x256
+        x = self.resblock1(x)  # -> 8x8x256
+        x = self.resblock2(x)  # -> 16x16x256
+        x = self.resblock3(x)  # -> 32x32x256
+        x = self.bn(x)
+        x = self.relu(x)
+        x = self.final_conv(x)  # -> 32x32x3
+        x = self.tanh(x)
+        return x,kld
+# Now let's update the Encoder and Decoder with these specific ResBlock implementations:
+
+class Encoder(nn.Module):
+    def __init__(self, img_channels=3,latent_dim=128):
+        super().__init__()
+        self.latent_dim = latent_dim
+        # Initial ResBlock down with 128 channels
+        self.resblock1 = ResBlockDown(img_channels, 128)  # 32x32 -> 16x16
+        self.resblock2 = ResBlockDown(128, 128)          # 16x16 -> 8x8
+        
+        # Regular ResBlocks with 128 channels
+        self.resblock3 = ResBlock(128, 128)              # 8x8
+        self.resblock4 = ResBlock(128, 128)              # 8x8
+        
+        # ReLU activation
+        self.relu = nn.ReLU()
+        
+        # Global sum pooling
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        
+        # Final dense layer to 128-dim latent space
+        self.dense = nn.Linear(128, latent_dim)
+        
+        self.head = nn.Sequential(
+            nn.Linear(latent_dim,latent_dim),
+            nn.ReLU(),
+            nn.Linear(latent_dim,latent_dim),
+            nn.ReLU(),
+            nn.Linear(latent_dim,1),
+        )
+    
+    def net(self, x):
+        x = self.resblock1(x)
+        x = self.resblock2(x)
+        x = self.resblock3(x)
+        x = self.resblock4(x)
+        x = self.relu(x)
+        x = self.global_pool(x)
+        x = x.view(x.size(0), -1)
+        x = self.dense(x)
+        return x
+    
+    def forward(self, x):
+        x = self.net(x)
+        x = self.head(x)
+        return x
+    
 
 # Modify training function
 def train_ebm_gan(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Initialize GradScaler for AMP
-    scaler = GradScaler()
-
-    # Data preprocessing
+    # Initialize AMP scaler
+    d_scaler = GradScaler()
+    g_scaler = GradScaler()
     transform = transforms.Compose([
+        transforms.RandomResizedCrop(32, scale=(0.2, 1.0)),
         transforms.RandomHorizontalFlip(),
+        transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+        transforms.RandomGrayscale(p=0.2),
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], 
+                            std=[0.5, 0.5, 0.5])
     ])
-
+    
+    transform = MultiViewTransform(transform,n_views=2)
+    
     # Load CIFAR-10
     trainset = torchvision.datasets.CIFAR10(root=args.data_path, train=True,
                                           download=True, transform=transform)
@@ -319,10 +292,12 @@ def train_ebm_gan(args):
                            shuffle=True, num_workers=args.num_workers)
 
     # Initialize models
-    generator = Generator(latent_dim=args.latent_dim, hidden_dim=64).to(device)
-    # discriminator = ResNetEnergyNet(img_channels=3, hidden_dim=64).to(device)
-    discriminator = EnergyNet(img_channels=3, hidden_dim=64).to(device)
-    
+    generator = Decoder(latent_dim=args.latent_dim).to(device)
+    discriminator = Encoder(latent_dim=args.latent_dim).to(device)
+    teacher_discriminator = Encoder(latent_dim=args.latent_dim).to(device)
+    # checkpoint = torch.load('../../autodl-tmp/output_cl_dino_all/ebm_gan_checkpoint_1000.pth')
+    # teacher_discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+    teacher_discriminator.load_state_dict(discriminator.state_dict())
     # Optimizers
     g_optimizer = torch.optim.AdamW(
         generator.parameters(), 
@@ -332,7 +307,7 @@ def train_ebm_gan(args):
     d_optimizer = torch.optim.AdamW(
         discriminator.parameters(), 
         lr=args.d_lr, 
-        betas=(0.5, 0.999)
+        betas=(args.g_beta1, args.g_beta2)
     )
     
     # Add Cosine Annealing schedulers
@@ -346,8 +321,15 @@ def train_ebm_gan(args):
         T_max=args.epochs,
         eta_min=args.min_lr
     )
+    
+    momentum_scheduler = cosine_scheduler(
+        base_value=0.996, final_value=1., 
+        epochs=args.epochs, niter_per_ep=len(trainloader), warmup_epochs=0, start_warmup_value=0.9994)
+
     start_epoch = 0
     
+    
+    pca_noiser = SVDPCANoise(noise_scale=args.noise_scale, kernel='linear', gamma=1.0) if args.noise_scale>0 else nn.Identity()
     # Add checkpoint loading logic
     if args.resume:
         checkpoint_path = args.resume
@@ -356,6 +338,7 @@ def train_ebm_gan(args):
             checkpoint = torch.load(checkpoint_path)
             generator.load_state_dict(checkpoint['generator_state_dict'])
             discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+            teacher_discriminator.load_state_dict(checkpoint['teacher_discriminator_state_dict'])
             g_optimizer.load_state_dict(checkpoint['g_optimizer_state_dict'])
             d_optimizer.load_state_dict(checkpoint['d_optimizer_state_dict'])
             g_scheduler.load_state_dict(checkpoint['g_scheduler_state_dict'])
@@ -367,81 +350,140 @@ def train_ebm_gan(args):
     for epoch in range(start_epoch,args.epochs):
         generator.train()
         discriminator.train()
-        
-        for i, (real_samples, _) in enumerate(tqdm(trainloader)):
+        teacher_discriminator.eval()
+        for i, (views, _) in enumerate(tqdm(trainloader)):
+            real_samples,aug_samples = views
             batch_size = real_samples.size(0)
             real_samples = real_samples.to(device)
-            
+            aug_samples = aug_samples.to(device)
+            it = i + epoch * len(trainloader)
+            momentum = momentum_scheduler[it]
+
             # Train Discriminator
             for _ in range(args.n_critic):
                 d_optimizer.zero_grad()
                 
-                with autocast():
-                    # Generate fake samples
-                    z = discriminator.net(real_samples.detach()).squeeze()
+                with autocast() if args.use_amp else nullcontext():
+                    
+                    
+                    z1 = discriminator.net(real_samples).squeeze()
+                    # z2 = discriminator.net(aug_samples).squeeze()
+                    with torch.no_grad():
+                        z_anchor = teacher_discriminator.net(real_samples.detach()).squeeze()
+                        z_anchor = z_anchor.detach()
+
+                    # z_anchor = z2.detach()
+                    #     # z_anchor2 = discriminator.net(real_samples.detach()).squeeze()
+                    #     # z_anchor2 = z_anchor2.detach()
+
+                    
+                    loss_tcr = -R(z1)
+                    loss_tcr /=200
+                    
+                    loss_cos = 1-F.cosine_similarity(z1,z_anchor.detach(),dim=-1).mean()
+
+                    
+                    loss_dino = loss_tcr+loss_cos
 
                     real_samples = real_samples.detach().requires_grad_(True)
-                    fake_samples = generator(z).detach().requires_grad_(True)
-
-                    # Compute energies
-                    # real_energy = discriminator(real_samples)
-                    # fake_energy = discriminator(fake_samples)
-                    z_fake = discriminator.net(fake_samples).squeeze()
-                    fake_energy = discriminator.head(z_fake)
-
-                    z_real = discriminator.net(real_samples).squeeze()
-                    real_energy = discriminator.head(z_real)
+                    # z = discriminator.net(real_samples).squeeze()
                     
+                    # z_noised = pca_noiser(z)
+                    
+                    z_noised = torch.randn(batch_size,args.latent_dim).to(device)
+                    fake_samples,_ = generator(z_noised)
+                    fake_samples = fake_samples.detach().requires_grad_(True)
+                    
+                    z_fake = discriminator.net(fake_samples).squeeze()
+
+                    
+                    real_energy = F.cosine_similarity(z,z_anchor,dim=-1)
+                    # real_energy2 = F.cosine_similarity(z2,z_anchor2,dim=-1)
+                    # real_energy = real_energy + real_energy2
+                    # real_energy /=2
+
+                    fake_energy = F.cosine_similarity(z_fake,z_anchor,dim=-1)
+
                     realistic_logits = real_energy - fake_energy
+
+                    
                     d_loss = F.softplus(-realistic_logits)
 
-                    d_loss_tcr = -R(z_real).mean()
-                    d_loss_tcr *= 1e-2
 
+
+                    d_loss = d_loss 
+                    
+                    loss_tcr = -R(z).mean()
+                    loss_tcr /=200
+                    
                     r1 = zero_centered_gradient_penalty(real_samples, real_energy)
                     r2 = zero_centered_gradient_penalty(fake_samples, fake_energy)
-
-
+                    
                     d_loss = d_loss + args.gp_weight/2 * (r1 + r2)
-                    d_loss = d_loss.mean() + d_loss_tcr
+                    d_loss = d_loss.mean()*args.adv_weight + loss_dino
+                if args.use_amp:
+                    d_scaler.scale(d_loss).backward()
+                    d_scaler.step(d_optimizer)
+                    d_scaler.update()
+                else:
+                    d_loss.backward()
+                    d_optimizer.step()
 
-                scaler.scale(d_loss).backward()
-                scaler.step(d_optimizer)
-            
+            with torch.no_grad():
+                for param_q, param_k in zip(discriminator.parameters(), teacher_discriminator.parameters()):
+                    param_k.data = momentum * param_k.data + (1 - momentum) * param_q.data
+
             # Train Generator
             g_optimizer.zero_grad()
             
-            with autocast():
+            with autocast() if args.use_amp else nullcontext():
                 # Generate new fake samples
+
+                z = z.detach()
                 z = discriminator.net(real_samples).squeeze()
-                fake_samples = generator(z)
-                # fake_energy = discriminator(fake_samples)
+                with torch.no_grad():
+                    z_anchor = teacher_discriminator.net(real_samples.detach()).squeeze()
+                    z_anchor = z_anchor.detach()
+                    
+
+                    
+                z_noised = torch.randn(batch_size,args.latent_dim).to(device)
+                fake_samples,_ = generator(z_noised)
+
                 z_fake = discriminator.net(fake_samples).squeeze()
-                fake_energy = discriminator.head(z_fake)
-                real_energy = discriminator(real_samples)
 
+                
+                real_energy = F.cosine_similarity(z,z_anchor,dim=-1)
+                fake_energy = F.cosine_similarity(z_fake,z_anchor,dim=-1)
 
-                g_loss_tcr = -R(z_fake).mean()
-                g_loss_tcr *= 1e-2
-
+                loss_tgr = -R(z_fake).mean()
+                loss_tgr /=200
+                
 
                 realistic_logits = fake_energy - real_energy
                 g_loss = F.softplus(-realistic_logits)
-                g_loss = g_loss.mean() #+ g_loss_tcr
-            
-            scaler.scale(g_loss).backward()
-            scaler.step(g_optimizer)
-            
-            scaler.update()
-            
+
+
+
+
+
+                g_loss = g_loss.mean()*args.adv_weight + loss_tgr
+            if args.use_amp:
+                g_scaler.scale(g_loss).backward()
+                g_scaler.step(g_optimizer)
+                g_scaler.update()
+            else:
+                g_loss.backward()
+                g_optimizer.step()
+
             if i % args.log_freq == 0:
                 current_g_lr = g_optimizer.param_groups[0]['lr']
                 current_d_lr = d_optimizer.param_groups[0]['lr']
                 print(f'Epoch [{epoch}/{args.epochs}], Step [{i}/{len(trainloader)}], '
                       f'D_loss: {d_loss.item():.4f}, G_loss: {g_loss.item():.4f}, '
                       f'r1: {r1.mean().item():.4f}, r2: {r2.mean().item():.4f}, '
-                      f'd_loss_tcr: {d_loss_tcr.item():.4f}, '
-                      f'g_loss_tcr: {g_loss_tcr.item():.4f}, '
+                      f'loss_tcr: {loss_tcr.item():.4f}, '
+                      f'loss_tgr: {loss_tgr.item():.4f}, '
                       f'Real Energy: {real_energy.mean().item():.4f}, '
                       f'Fake Energy: {fake_energy.mean().item():.4f}, '
                       f'G_LR: {current_g_lr:.6f}, D_LR: {current_d_lr:.6f}'
@@ -451,8 +493,7 @@ def train_ebm_gan(args):
         g_scheduler.step()
         d_scheduler.step()
         
-        real_samples = next(iter(trainloader))[0].to(device)
-        save_gan_samples(generator, discriminator, epoch, args.output_dir, device,real_samples=real_samples)
+        save_gan_samples(generator, discriminator, epoch, args.output_dir, device,real_samples=real_samples,pca_noiser=pca_noiser)
     
         # Save samples and model checkpoints
         if epoch % args.save_freq == 0:
@@ -460,22 +501,23 @@ def train_ebm_gan(args):
                 'epoch': epoch,
                 'generator_state_dict': generator.state_dict(),
                 'discriminator_state_dict': discriminator.state_dict(),
+                'teacher_discriminator_state_dict': teacher_discriminator.state_dict(),
                 'g_optimizer_state_dict': g_optimizer.state_dict(),
                 'd_optimizer_state_dict': d_optimizer.state_dict(),
                 'g_scheduler_state_dict': g_scheduler.state_dict(),
                 'd_scheduler_state_dict': d_scheduler.state_dict(),
             }, os.path.join(args.output_dir, f'ebm_gan_checkpoint_{epoch}.pth'))
 
-def save_gan_samples(generator, discriminator, epoch, output_dir, device, n_samples=36,real_samples=None):
+def save_gan_samples(generator, discriminator, epoch, output_dir, device, n_samples=36,real_samples=None,pca_noiser=None):
     generator.eval()
-    discriminator.eval()
     real_samples = real_samples[:n_samples]
     batch_size = real_samples.size(0)
     with torch.no_grad():
         
-        z = discriminator.net(real_samples.detach()).squeeze()
-
-        fake_samples = generator(z)
+        # z = discriminator.net(real_samples.detach()).squeeze()
+        # z_noised = pca_noiser(z)
+        z_noised = torch.randn(batch_size,args.latent_dim).to(device)
+        fake_samples,_ = generator(z_noised)
         
         # Changed 'range' to 'value_range'
         grid = make_grid(fake_samples, nrow=6, normalize=True, value_range=(-1, 1))
@@ -496,7 +538,6 @@ def save_gan_samples(generator, discriminator, epoch, output_dir, device, n_samp
 
         plt.close()
     generator.train()
-    discriminator.train()
 
 def compute_gradient_penalty(discriminator, real_samples, fake_samples, device):
     """Compute gradient penalty for improved training stability"""
@@ -528,6 +569,8 @@ def get_args_parser():
                         help='Number of discriminator updates per generator update')
     parser.add_argument('--gp_weight', default=0.05, type=float,
                         help='Weight of gradient penalty')
+    parser.add_argument('--noise_scale', default=0.0, type=float,
+                        help='Weight of gradient penalty')
     
     # Modify learning rates
     parser.add_argument('--g_beta1', default=0.5, type=float,
@@ -537,6 +580,8 @@ def get_args_parser():
     
     parser.add_argument('--cls', default=-1, type=int,
                         help='Class to train on')
+    parser.add_argument('--adv_weight', default=0.1, type=float,
+                        help='Weight of adversarial loss')
     
     # Existing parameters
     parser.add_argument('--epochs', default=1200, type=int)
