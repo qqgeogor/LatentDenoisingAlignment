@@ -8,7 +8,7 @@ from torch.cuda.amp import autocast, GradScaler
 from pathlib import Path
 import matplotlib.pyplot as plt
 from torchvision.utils import make_grid
-from utils_ibot import SVDPCANoise
+from utils_ibot import SVDPCANoise,cosine_scheduler
 import numpy as np
 from tqdm import tqdm
 import argparse
@@ -405,8 +405,6 @@ def train_ebm_gan(args):
         use_checkpoint=args.use_checkpoint
     ).to(device)
 
-    # generator_projector = GeneratorProjector(latent_dim=192).to(device)
-    
 
 
     # discriminator = ResNetEnergyNet(img_channels=3, hidden_dim=64).to(device)
@@ -426,6 +424,24 @@ def train_ebm_gan(args):
         use_checkpoint=args.use_checkpoint
     ).to(device)
     
+    teacher_discriminator = MaskedAutoencoderViT(
+        img_size=args.img_size,
+        patch_size=args.patch_size,
+        in_chans=3,
+        embed_dim=args.embed_dim,
+        depth=args.depth,
+        num_heads=args.num_heads,
+        decoder_embed_dim=args.decoder_embed_dim,
+        decoder_depth=0,
+        decoder_num_heads=args.decoder_num_heads,
+        mlp_ratio=args.mlp_ratio,
+        norm_layer=nn.LayerNorm,
+        norm_pix_loss=False,
+        use_checkpoint=args.use_checkpoint
+    ).to(device)
+
+    teacher_discriminator.load_state_dict(discriminator.state_dict())
+
     # Optimizers
     g_optimizer = torch.optim.AdamW(
         generator.parameters(),
@@ -452,6 +468,11 @@ def train_ebm_gan(args):
     start_epoch = 0
     pca_noiser = SVDPCANoise(noise_scale=args.noise_scale, kernel='linear', gamma=1.0)
 
+    
+    momentum_scheduler = cosine_scheduler(
+        base_value=args.base_momentum, final_value=args.final_momentum, 
+        epochs=args.epochs, niter_per_ep=len(trainloader))
+    
     # Add checkpoint loading logic
     if args.resume:
         checkpoint_path = args.resume
@@ -476,6 +497,8 @@ def train_ebm_gan(args):
             batch_size = real_samples.size(0)
             real_samples = real_samples.to(device)
             
+            it = i + epoch * len(trainloader)
+            momentum = momentum_scheduler[it]
             # Train Discriminator
             for _ in range(args.n_critic):  # Train discriminator more frequently
                 d_optimizer.zero_grad()
@@ -492,7 +515,9 @@ def train_ebm_gan(args):
                     fake_samples = generator.unpatchify(fake_samples).detach().requires_grad_(True)
                     
                     # Compute energies
-                    z_anchor = discriminator.forward_feature(real_samples)
+                    with torch.no_grad():
+                        z_anchor = teacher_discriminator.forward_feature(real_samples).detach()
+
                     z_fake = discriminator.forward_feature(fake_samples)
                     mask = mask.bool()
                     real_energy = F.cosine_similarity(z_real[:,1:][mask,:], z_anchor[:,1:][mask,:].detach(), dim=1)
@@ -520,7 +545,11 @@ def train_ebm_gan(args):
                 scaler_d.scale(d_loss).backward()
                 scaler_d.step(d_optimizer)
                 scaler_d.update()
-            
+
+            with torch.no_grad():
+                for param_q, param_k in zip(discriminator.parameters(), teacher_discriminator.parameters()):
+                    param_k.data.mul_(momentum).add_(param_q.data, alpha=1 - momentum)
+
             # Train Generator
             g_optimizer.zero_grad()
             
@@ -537,7 +566,8 @@ def train_ebm_gan(args):
                 fake_samples = generator.unpatchify(fake_samples)
                 
                 # Compute energies
-                z_anchor = discriminator.forward_feature(real_samples)
+                with torch.no_grad():
+                    z_anchor = teacher_discriminator.forward_feature(real_samples).detach()
                 z_fake = discriminator.forward_feature(fake_samples)
                 mask = mask.bool()
                 real_energy = F.cosine_similarity(z_real[:,1:][mask,:], z_anchor[:,1:][mask,:].detach(), dim=1)
@@ -668,6 +698,10 @@ def get_args_parser():
                         help='Noise scale for PCA noise')
     parser.add_argument('--adv_weight', default=1.0, type=float,
                         help='Weight of adversarial loss')
+    parser.add_argument('--base_momentum', default=0.996, type=float,
+                        help='Base momentum for momentum scheduler')
+    parser.add_argument('--final_momentum', default=1.0, type=float,
+                        help='Final momentum for momentum scheduler')
     
     # Modify learning rates
     parser.add_argument('--g_beta1', default=0.5, type=float,
