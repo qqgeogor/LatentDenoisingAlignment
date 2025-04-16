@@ -527,10 +527,10 @@ def train_ebm_gan(args):
 
                     # Compute loss
                     realistic_logits = real_energy - fake_energy
-                    d_loss = F.softplus(-realistic_logits)
+                    d_loss = F.softplus(-realistic_logits/args.temperature)
 
                     realistic_logits_global = real_energy_global - fake_energy_global
-                    d_loss_global = F.softplus(-realistic_logits_global)
+                    d_loss_global = F.softplus(-realistic_logits_global/args.temperature)
 
                     loss_tcr = -R(z_real[:,1:][mask,:]).mean()
                     loss_tcr *= 1e-2
@@ -577,12 +577,12 @@ def train_ebm_gan(args):
                 
                 # Compute loss
                 realistic_logits = fake_energy - real_energy
-                g_loss = F.softplus(-realistic_logits)
+                g_loss = F.softplus(-realistic_logits/args.temperature)
 
                                 
                 # Compute loss
                 realistic_logits_global = fake_energy_global - real_energy_global
-                g_loss_global = F.softplus(-realistic_logits_global)
+                g_loss_global = F.softplus(-realistic_logits_global/args.temperature)
 
                 loss_tgr = -R(z_fake[:,1:][mask,:]).mean()
                 loss_tgr *= 1e-2
@@ -725,6 +725,7 @@ def get_args_parser():
     parser.add_argument('--save_freq', default=1, type=int)
     parser.add_argument('--tcr_weight', default=0, type=float)
     parser.add_argument('--global_weight', default=0, type=float)
+    parser.add_argument('--temperature', default=1.0, type=float)
 
 
     # model parameters
