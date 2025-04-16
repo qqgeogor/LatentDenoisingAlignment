@@ -8,7 +8,7 @@ from pathlib import Path
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
-from vit_ibot_registry import MaskedAutoencoderViT
+from train_mae_cifar10_hldae_imagenet import MaskedAutoencoderViT
 from torch.cuda.amp import autocast
 import torch.nn.functional as F
 from sklearn.decomposition import PCA
@@ -204,14 +204,13 @@ def evaluate_model(args):
         mlp_ratio=args.mlp_ratio,
         norm_layer=nn.LayerNorm,
         norm_pix_loss=args.norm_pix_loss,
-        use_checkpoint=False,
-        num_register_tokens=args.num_register_tokens
+        use_checkpoint=False
     ).to(device)
     
     if args.pretrained_path:    
         print(f"Loading pretrained model from {args.pretrained_path}")
         checkpoint = torch.load(args.pretrained_path)
-        model.load_state_dict(checkpoint['discriminator_state_dict'], strict=True)
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     else:
         print("No pretrained model provided. Using randomly initialized model.")
 
@@ -310,7 +309,7 @@ def get_args_parser():
                        help='Depth of the model')
     parser.add_argument('--num_heads', type=int, default=3,
                        help='Number of attention heads')
-    parser.add_argument('--decoder_embed_dim', type=int, default=192,
+    parser.add_argument('--decoder_embed_dim', type=int, default=96,
                        help='Decoder embedding dimension')
     parser.add_argument('--decoder_depth', type=int, default=0,
                        help='Decoder depth')
@@ -320,8 +319,7 @@ def get_args_parser():
                        help='Ratio of MLP hidden dimension to embedding dimension')
     parser.add_argument('--norm_pix_loss', action='store_true', default=False,
                        help='Normalize pixel values before computing the loss')
-    parser.add_argument('--num_register_tokens', type=int, default=0,
-                       help='Number of register tokens')
+    
     # Dataset parameters
     parser.add_argument('--dataset', type=str, default='cifar10',
                        help='Dataset to use')

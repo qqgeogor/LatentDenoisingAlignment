@@ -5,7 +5,7 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from functools import partial
 import numpy as np
-from timm.models.vision_transformer import PatchEmbed
+# from timm.models.vision_transformer import PatchEmbed
 from timm.models.layers import trunc_normal_
 import os
 import matplotlib.pyplot as plt
@@ -427,11 +427,29 @@ class DyTanh(nn.Module):
         return x * self.weight + self.bias
 
 
+class PatchEmbed(nn.Module):
+    """ Image to Patch Embedding
+    """
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768, bias=True):
+        super().__init__()
+        num_patches = (img_size // patch_size) * (img_size // patch_size)
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.num_patches = num_patches
+
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size, bias=bias)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        x = self.proj(x)
+        x = x.flatten(2).transpose(1, 2)  # NCHW -> NLC
+        return x
+    
 class MaskedAutoencoderViT(nn.Module):
     def __init__(self, img_size=32, patch_size=4, in_chans=3,
                  embed_dim=192, depth=12, num_heads=3,
                  decoder_embed_dim=96, decoder_depth=4, decoder_num_heads=3,
-                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, use_checkpoint=False):
+                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, use_checkpoint=False,num_register_tokens=0):
         super().__init__()
         self.use_checkpoint = use_checkpoint
         self.embed_dim = embed_dim
@@ -444,6 +462,12 @@ class MaskedAutoencoderViT(nn.Module):
         self.decoder_embed_dim = decoder_embed_dim
         self.decoder_depth = decoder_depth
         self.decoder_num_heads = decoder_num_heads
+        self.num_register_tokens = num_register_tokens
+        assert num_register_tokens >= 0
+        self.register_tokens = (
+            nn.Parameter(torch.zeros(1, num_register_tokens, embed_dim)) if num_register_tokens else None
+        )
+
         
         self.proj_head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim*4),
@@ -505,7 +529,10 @@ class MaskedAutoencoderViT(nn.Module):
         # Initialize patch_embed like nn.Linear
         w = self.patch_embed.proj.weight.data
         torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
-
+        
+        if self.register_tokens is not None:
+            nn.init.normal_(self.register_tokens, std=1e-6)
+        
         # Initialize tokens and other parameters
         torch.nn.init.normal_(self.cls_token, std=.02)
         torch.nn.init.normal_(self.mask_token, std=.02)
@@ -542,8 +569,6 @@ class MaskedAutoencoderViT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], 3, h * p, h * p))
         return imgs
 
-    
-    
     def random_masking(self, x, mask_ratio):
         N, L, D = x.shape
         len_keep = int(L * (1 - mask_ratio))
@@ -561,6 +586,30 @@ class MaskedAutoencoderViT(nn.Module):
 
         return x_masked, mask, ids_restore
     
+    def interpolate_pos_encoding(self, x, w, h):
+        npatch = x.shape[1] - 1
+        N = self.pos_embed.shape[1] - 1
+        if npatch == N and w == h:
+            return self.pos_embed
+        class_pos_embed = self.pos_embed[:, 0]
+        
+        patch_pos_embed = self.pos_embed[:, 1:]
+        dim = x.shape[-1]
+        w0 = w // self.patch_embed.patch_size
+        h0 = h // self.patch_embed.patch_size
+        # we add a small number to avoid floating point error in the interpolation
+        # see discussion at https://github.com/facebookresearch/dino/issues/8
+        w0, h0 = w0 + 0.1, h0 + 0.1
+        patch_pos_embed = nn.functional.interpolate(
+            patch_pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(0, 3, 1, 2),
+            scale_factor=(w0 / math.sqrt(N), h0 / math.sqrt(N)),
+            mode='bicubic',
+        )
+        assert int(w0) == patch_pos_embed.shape[-2] and int(h0) == patch_pos_embed.shape[-1]
+        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+        return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
+    
+
 
     def forward_predictor(self, x, masks_x=None, masks=None):
 
@@ -612,14 +661,28 @@ class MaskedAutoencoderViT(nn.Module):
     
 
     def forward_feature(self, x,masks=None):
+        b,c,h,w = x.shape
         x = self.patch_embed(x)
-        x = x + self.pos_embed[:, 1:, :]
+        # x = x + self.pos_embed[:, 1:, :]
         if masks is not None:
             x = apply_masks(x, masks)
         
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
         cls_tokens = cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
+
+        x = x+self.interpolate_pos_encoding(x, w, h)
+
+
+        if self.register_tokens is not None:
+            x = torch.cat(
+                (
+                    x[:, :1],
+                    self.register_tokens.expand(x.shape[0], -1, -1),
+                    x[:, 1:],
+                ),
+                dim=1,
+            )
 
         for blk in self.blocks:
             if self.use_checkpoint and self.training:
@@ -630,13 +693,15 @@ class MaskedAutoencoderViT(nn.Module):
         return x
 
     def forward_encoder(self, x, mask_ratio):
+        b,c,w,h = x.shape
         x = self.patch_embed(x)
         x = x + self.pos_embed[:, 1:, :]
         x, mask, ids_restore = self.random_masking(x, mask_ratio)
 
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
-        cls_tokens = cls_token.expand(x.shape[0], -1, -1)
+        cls_tokens = self.cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
+
 
         for blk in self.blocks:
             if self.use_checkpoint and self.training:
@@ -720,8 +785,8 @@ class MaskedAutoencoderViT(nn.Module):
                 x = blk(x)
         x = self.decoder_norm(x)
         x = self.decoder_pred(x)
-        x = x[:, 1:, :]  # Remove CLS token
-
+        
+        x = x[:, 1+self.num_register_tokens:, :]
         return x
 
     def forward_loss(self, imgs, pred, mask,weightings=None):

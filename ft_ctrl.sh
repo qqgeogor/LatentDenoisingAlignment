@@ -170,3 +170,260 @@ python finetune_ctrl_ldr_vae_knn.py \
     --pretrained_path /mnt/d/repo/output/ctrl-ldr-ema-cos-cl-temp01/ebm_gan_checkpoint_10.pth \
     --visualize_features
     
+
+
+
+python finetune_ctrl_ldr_vae.py     \
+    --latent_dim 384         \
+    --use_amp   \
+    --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_temp01/ebm_gan_checkpoint_300.pth \
+    --mlflow_experiment_name ctrl_ldr_ema_cos_cl_temp01 \
+    --run_name ctrl_ldr_ema_cos_cl_temp01_300epoch
+
+
+
+python finetune_ctrl_ldr_vae.py     \
+    --latent_dim 384         \
+    --use_amp   \
+    --pretrained_path ../../autodl-tmp/output_cl_dino_all/ebm_gan_checkpoint_300.pth \
+    --mlflow_experiment_name cl_dino_all \
+    --run_name cl_dino_all_300epoch
+
+
+
+python finetune_ctrl_ldr_vae.py     \
+    --latent_dim 384         \
+    --use_amp   \
+    --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_temp05/ebm_gan_checkpoint_300.pth \
+    --mlflow_experiment_name ctrl_ldr_ema_cos_cl_temp05 \
+    --run_name ctrl_ldr_ema_cos_cl_temp05_300epoch
+
+
+python finetune_ctrl_vit_knn.py \
+    --latent_dim 192     \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit/ebm_gan_checkpoint_20.pth   \
+    --visualize_features
+    
+
+
+python finetune_ctrl_vit_knn.py \
+    --latent_dim 192     \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit/ebm_gan_checkpoint_400.pth   \
+    --visualize_features
+    
+
+
+
+python finetune_ctrl_vit_knn.py \
+    --latent_dim 192     \
+    --img_size 128 \
+    --patch_size 16 \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit_imagenet100/ebm_gan_checkpoint_60.pth   \
+    --visualize_features 
+
+
+python finetune_vit_knn.py   \
+  --latent_dim 192         \
+  --img_size 128     \
+  --patch_size 16     \
+  --use_amp         \
+  --pretrained_path ../../autodl-tmp/output_mdae/checkpoint_epoch_300.pth       \
+  --visualize_features  \
+  --decoder_depth 4
+
+
+python finetune_cifar_classifier_vit_ctrl.py       \
+  --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit_imagenet100/ebm_gan_checkpoint_60.pth         \
+  --img_size 128         \
+  --patch_size 16          \
+  --decoder_embed_dim 192         \
+  --decoder_num_heads 3         \
+  --mlflow_experiment_name ctrl_ldr_ema_cos_cl_vit_imagenet100         \
+  --run_name ctrl_ldr_ema_cos_cl_vit_imagenet100_60epoch
+
+
+python finetune_ctrl_vit_knn.py \
+    --latent_dim 192     \
+    --img_size 128 \
+    --patch_size 16 \
+    --decoder_embed_dim 192 \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit_imagenet100/ebm_gan_checkpoint_50.pth   \
+    --visualize_features  \
+    --num_register_tokens 0
+
+
+python finetune_ctrl_vit_knn.py \
+    --latent_dim 192     \
+    --img_size 128 \
+    --patch_size 16 \
+    --decoder_embed_dim 192 \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit_reg_imagenet100/ebm_gan_checkpoint_50.pth   \
+    --visualize_features  \
+    --num_register_tokens 16
+
+
+
+python finetune_cifar_classifier_vit_ctrl.py       \
+  --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit_imagenet100/ebm_gan_checkpoint_90.pth         \
+  --img_size 128         \
+  --patch_size 16          \
+  --decoder_embed_dim 192         \
+  --decoder_num_heads 3         \
+  --num_register_tokens 0 \
+  --mlflow_experiment_name ctrl_ldr_ema_cos_cl_vit_imagenet100         \
+  --run_name ctrl_ldr_ema_cos_cl_vit_imagenet100_90epoch
+
+
+  
+python finetune_cifar_classifier_vit_ctrl.py       \
+  --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit_reg_imagenet100/ebm_gan_checkpoint_90.pth         \
+  --img_size 128         \
+  --patch_size 16          \
+  --decoder_embed_dim 192         \
+  --decoder_num_heads 3         \
+  --num_register_tokens 16 \
+  --mlflow_experiment_name ctrl_ldr_ema_cos_cl_vit_reg_imagenet100         \
+  --run_name ctrl_ldr_ema_cos_cl_vit_reg_imagenet100_90epoch
+
+
+python finetune_cifar_classifier_vit_ctrl.py       \
+  --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit_reg_imagenet100/ebm_gan_checkpoint_90.pth         \
+  --img_size 128         \
+  --patch_size 16          \
+  --decoder_embed_dim 192         \
+  --decoder_num_heads 3         \
+  --num_register_tokens 16 \
+  --mlflow_experiment_name ctrl_ldr_ema_cos_cl_vit_reg_imagenet100         \
+  --run_name ctrl_ldr_ema_cos_cl_vit_reg_imagenet100_90epoch
+
+
+python finetune_cifar_classifier_vit_ctrl.py       \
+  --pretrained_path ../../autodl-tmp/output_cl_vit_imagenet100/ebm_gan_checkpoint_90.pth         \
+  --img_size 128         \
+  --patch_size 16          \
+  --decoder_embed_dim 192         \
+  --decoder_num_heads 3         \
+  --num_register_tokens 0 \
+  --mlflow_experiment_name cl_vit_imagenet100         \
+  --run_name cl_vit_imagenet100_90epoch
+
+
+  
+python finetune_ctrl_vit_knn.py \
+    --latent_dim 192     \
+    --img_size 128 \
+    --patch_size 16 \
+    --decoder_embed_dim 192 \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_cl_vit_imagenet100/ebm_gan_checkpoint_90.pth   \
+    --visualize_features  \
+    --num_register_tokens 0
+
+
+
+
+
+python finetune_ctrl_vit_knn.py \
+    --latent_dim 192     \
+    --img_size 128 \
+    --patch_size 16 \
+    --decoder_embed_dim 192 \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_cl_vit_imagenet100/ebm_gan_checkpoint_90.pth   \
+    --visualize_features  \
+    --num_register_tokens 0
+    
+
+
+  
+python finetune_ctrl_vit_knn.py \
+    --latent_dim 192     \
+    --img_size 128 \
+    --patch_size 16 \
+    --decoder_embed_dim 192 \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit_imagenet100/ebm_gan_checkpoint_90.pth   \
+    --visualize_features  \
+    --num_register_tokens 0
+
+
+
+
+python finetune_ctrl_vit_knn.py \
+    --latent_dim 192     \
+    --img_size 128 \
+    --patch_size 16 \
+    --decoder_embed_dim 192 \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit_reg_imagenet100/ebm_gan_checkpoint_90.pth   \
+    --visualize_features  \
+    --num_register_tokens 16
+
+
+
+
+
+  
+python finetune_ctrl_vit_knn.py \
+    --latent_dim 192     \
+    --img_size 128 \
+    --patch_size 16 \
+    --decoder_embed_dim 192 \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit_imagenet100/ebm_gan_checkpoint_50.pth   \
+    --visualize_features  \
+    --num_register_tokens 0
+
+
+
+
+python finetune_cifar_classifier_vit_ctrl.py       \
+  --pretrained_path ../../autodl-tmp/output_cl_vit_imagenet100/ebm_gan_checkpoint_80.pth         \
+  --img_size 128         \
+  --patch_size 16          \
+  --decoder_embed_dim 192         \
+  --decoder_num_heads 3         \
+  --num_register_tokens 0 \
+  --mlflow_experiment_name cl_vit_imagenet100         \
+  --run_name cl_vit_imagenet100_80epoch
+
+
+python finetune_cifar_classifier_vit_ctrl.py       \
+  --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit_imagenet100/ebm_gan_checkpoint_80.pth         \
+  --img_size 128         \
+  --patch_size 16          \
+  --decoder_embed_dim 192         \
+  --decoder_num_heads 3         \
+  --num_register_tokens 0 \
+  --mlflow_experiment_name ctrl_ldr_ema_cos_cl_vit_imagenet100         \
+  --run_name ctrl_ldr_ema_cos_cl_vit_imagenet100_80epoch
+
+
+  
+python finetune_ctrl_vit_knn.py \
+    --latent_dim 192     \
+    --img_size 128 \
+    --patch_size 16 \
+    --decoder_embed_dim 192 \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit_imagenet100/ebm_gan_checkpoint_60.pth   \
+    --visualize_features  \
+    --num_register_tokens 0
+
+
+
+  
+python finetune_ctrl_vit_knn.py \
+    --latent_dim 192     \
+    --img_size 128 \
+    --patch_size 16 \
+    --decoder_embed_dim 192 \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit_imagenet100/ebm_gan_checkpoint_70.pth   \
+    --visualize_features  \
+    --num_register_tokens 0

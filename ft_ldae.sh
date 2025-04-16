@@ -278,6 +278,17 @@ python finetune_cifar_classifier_vit_hldae_tiny.py     \
 
 
 
+
+python finetune_cifar_classifier_vit_hldae_tiny.py     \
+    --pretrained_path ../../autodl-tmp/output_mdae/checkpoint_epoch_300.pth     \
+    --img_size 128     \
+    --patch_size 16      \
+    --decoder_embed_dim 96     \
+    --decoder_num_heads 3     \
+    --mlflow_experiment_name mdae     \
+    --run_name mdae_300epoch
+
+
 python finetune_cifar_classifier_vit_hldae_tiny.py     \
     --pretrained_path ../../autodl-tmp/output_masked_ldae/checkpoint_epoch_100.pth     \
     --img_size 128     \
@@ -315,3 +326,15 @@ python finetune_cifar_classifier_vit_hldae_tiny.py     \
     --decoder_num_heads 3     \
     --mlflow_experiment_name ae_sigma_0_25_sqrt_noise_pred     \
     --run_name ae_sigma_0_25_sqrt_noise_pred_200epoch
+
+
+
+python finetune_cifar_classifier_vit_ibot.py     \
+    --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit/ebm_gan_checkpoint_300.pth     \
+    --img_size 32     \
+    --patch_size 4      \
+    --decoder_embed_dim 192     \
+    --decoder_num_heads 3     \
+    --model_type discriminator     \
+    --mlflow_experiment_name ctrl_ldr_ema_cos_cl_vit     \
+    --run_name ctrl_ldr_ema_cos_cl_vit_300epoch
