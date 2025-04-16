@@ -19,7 +19,7 @@ os.environ['MPLBACKEND'] = 'Agg'
 import matplotlib
 matplotlib.use('Agg')
 
-from vit_ibot import MaskedAutoencoderViT
+from vit_ibot_registry import MaskedAutoencoderViT
 
 def zero_centered_gradient_penalty(samples, critics):
     grad, = torch.autograd.grad(outputs=critics.sum(), inputs=samples, create_graph=True)
@@ -351,15 +351,31 @@ def train_ebm_gan(args):
     scaler_g = GradScaler()
     scaler_d = GradScaler()
 
-    # Data preprocessing
-    transform = transforms.Compose([
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-    ])
-
+    if args.dataset == 'imagenet100':
+        transform = transforms.Compose([
+            transforms.RandomResizedCrop(args.img_size, scale=(0.95, 1.0)),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            # image net normalization
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                                 std=[0.229, 0.224, 0.225])
+        ])
+    else:
+        transform = transforms.Compose([
+            transforms.RandomResizedCrop(32, scale=(0.2, 1.0)),
+            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+        ])
+    
     # Load CIFAR-10
-    trainset = torchvision.datasets.CIFAR10(root=args.data_path, train=True,
+    if args.dataset == 'imagenet100':
+        print('dataset',args.dataset)
+        print('dataset loaded',args.data_path)
+
+        trainset = torchvision.datasets.ImageFolder(root=args.data_path, transform=transform)
+        
+    else:
+        trainset = torchvision.datasets.CIFAR10(root=args.data_path, train=True,
                                           download=True, transform=transform)
     
     # Filter the dataset to only include class 1
@@ -374,19 +390,19 @@ def train_ebm_gan(args):
 
     # Initialize models
     generator =  MaskedAutoencoderViT(
-        img_size=32,
-        patch_size=4,
+        img_size=args.img_size,
+        patch_size=args.patch_size,
         in_chans=3,
-        embed_dim=192,
+        embed_dim=args.embed_dim,
         depth=0,
-        num_heads=3,
-        decoder_embed_dim=192,
-        decoder_depth=6,
-        decoder_num_heads=3,
-        mlp_ratio=4.,
+        num_heads=args.num_heads,
+        decoder_embed_dim=args.decoder_embed_dim,
+        decoder_depth=args.decoder_depth,
+        decoder_num_heads=args.decoder_num_heads,
+        mlp_ratio=args.mlp_ratio,
         norm_layer=nn.LayerNorm,
         norm_pix_loss=False,
-        use_checkpoint=False
+        use_checkpoint=args.use_checkpoint
     ).to(device)
 
     # generator_projector = GeneratorProjector(latent_dim=192).to(device)
@@ -395,19 +411,19 @@ def train_ebm_gan(args):
 
     # discriminator = ResNetEnergyNet(img_channels=3, hidden_dim=64).to(device)
     discriminator = MaskedAutoencoderViT(
-        img_size=32,
-        patch_size=4,
+        img_size=args.img_size,
+        patch_size=args.patch_size,
         in_chans=3,
-        embed_dim=192,
-        depth=6,
-        num_heads=3,
-        decoder_embed_dim=192,
+        embed_dim=args.embed_dim,
+        depth=args.depth,
+        num_heads=args.num_heads,
+        decoder_embed_dim=args.decoder_embed_dim,
         decoder_depth=0,
-        decoder_num_heads=3,
-        mlp_ratio=4.,
+        decoder_num_heads=args.decoder_num_heads,
+        mlp_ratio=args.mlp_ratio,
         norm_layer=nn.LayerNorm,
         norm_pix_loss=False,
-        use_checkpoint=False
+        use_checkpoint=args.use_checkpoint
     ).to(device)
     
     # Optimizers
@@ -636,6 +652,10 @@ def compute_gradient_penalty(discriminator, real_samples, fake_samples, device):
 def get_args_parser():
     parser = argparse.ArgumentParser('EBM-GAN training for CIFAR-10')
     
+    parser.add_argument('--dataset', default='imagenet100', type=str,
+                        help='Dataset to train on')
+    
+    
     # Add GAN-specific parameters
     parser.add_argument('--latent_dim', default=128, type=int)
     parser.add_argument('--g_lr', default=1e-4, type=float)
@@ -672,6 +692,19 @@ def get_args_parser():
     parser.add_argument('--tcr_weight', default=0, type=float)
     parser.add_argument('--global_weight', default=0, type=float)
 
+
+    # model parameters
+    parser.add_argument('--img_size', default=32, type=int) 
+    parser.add_argument('--patch_size', default=4, type=int)
+    parser.add_argument('--embed_dim', default=192, type=int)
+    parser.add_argument('--depth', default=12, type=int)
+    parser.add_argument('--num_heads', default=3, type=int)
+    parser.add_argument('--decoder_embed_dim', default=192, type=int)
+    parser.add_argument('--decoder_depth', default=4, type=int)
+    parser.add_argument('--decoder_num_heads', default=3, type=int)
+    parser.add_argument('--mlp_ratio', default=4., type=float)
+    parser.add_argument('--use_checkpoint', default=False, type=bool)
+    
     # Add learning rate scheduling parameters
     parser.add_argument('--min_lr', default=1e-6, type=float,
                         help='Minimum learning rate for cosine annealing')
