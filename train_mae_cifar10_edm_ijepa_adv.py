@@ -231,7 +231,6 @@ class MaskedAutoencoderViT(nn.Module):
                 x = blk(x)
         x = self.predictor_norm(x)
         x = self.predictor_pred(x)
-        x = x[:, 1:, :]  # Remove CLS token
 
         return x
 
@@ -577,7 +576,8 @@ def get_args_parser():
                         help='Ratio of masked patches')
     parser.add_argument('--warmup_epochs', default=10, type=int,
                         help='Number of epochs for warmup')
-    
+    parser.add_argument('--adv_weight', default=0.2, type=float,
+                        help='Weight for adversarial loss')
     # System parameters
     parser.add_argument('--num_workers', default=8, type=int,
                         help='Number of data loading workers')
@@ -784,12 +784,16 @@ def train_mae():
             
             with autocast() if args.use_amp else nullcontext():
                 with torch.no_grad():
-                    z_anchor = teacher_model.forward_feature(imgs)[:,1:]
+                    z_anchor = teacher_model.forward_feature(imgs)
+                    z_anchor_cls = z_anchor[:,0]
+                    z_anchor = z_anchor[:,1:]
                     z_anchor = F.layer_norm(z_anchor, (z_anchor.shape[-1],))
 
                 z,mask,ids_restore = model.forward_encoder(imgs, mask_ratio=args.mask_ratio)
 
                 z_pred = model.forward_predictor(z,mask,ids_restore)
+                z_pred_cls = z_pred[:,0]
+                z_pred = z_pred[:,1:]
                 b,n,c = z_pred.shape
 
                 z_pred = z_pred[mask.bool(),:]
@@ -799,6 +803,8 @@ def train_mae():
                 
                 loss_ijepa = F.smooth_l1_loss(z_pred, z_anchor,reduction='none').mean(-1).mean()
                 
+
+
 
                 
                 noised_image,sigma = model.sampler.add_noise(imgs)
@@ -815,7 +821,18 @@ def train_mae():
                 pred = model.precond(z.detach(), noised_image, mask, ids_restore,sigma)
                 loss_edm = model.forward_loss(imgs, pred, mask,weightings)
                 
-                loss = loss_ijepa + loss_edm
+                fake_imgs = model.unpatchify(pred).detach()
+                z_fake = model.forward_feature(fake_imgs)
+                z_fake_cls = z_fake[:,0]
+
+                z_pred_cls = model.forward_feature(imgs)[:,0]
+                real_energy = F.cosine_similarity(z_pred_cls,z_anchor_cls,dim=-1)
+                fake_energy = F.cosine_similarity(z_fake_cls,z_anchor_cls,dim=-1)
+                
+                relativistic_energy = real_energy - fake_energy
+                loss_adv = F.softplus(-relativistic_energy).mean()
+                
+                loss = loss_ijepa + loss_edm + loss_adv*args.adv_weight
 
             if args.use_amp:
                 scaler.scale(loss).backward()
@@ -840,6 +857,9 @@ def train_mae():
                       f'Loss: {avg_loss:.3f}, '
                       f'Loss_ijepa: {loss_ijepa:.3f}, '
                       f'Loss_edm: {loss_edm:.3f}, '
+                      f'Loss_adv: {loss_adv:.3f}, '
+                      f'real_energy: {real_energy.mean():.3f}, '
+                      f'fake_energy: {fake_energy.mean():.3f}, '
                       f'LR: {current_lr:.6f}')
         
         epoch_loss = total_loss / num_batches

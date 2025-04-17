@@ -1,6 +1,6 @@
-python train_mae_cifar10_edm_ijepa.py \
+python train_mae_cifar10_edm_ijepa_adv.py \
 --use_amp \
---output_dir ../../autodl-tmp/output_edm_imagenet100/ \
+--output_dir ../../autodl-tmp/output_edm_ijepa_adv_imagenet100/ \
 --img_size 128 \
 --patch_size 16 \
 --dataset 'tiny-imagenet' \

@@ -495,14 +495,14 @@ python finetune_cifar_classifier_vit_ctrl.py       \
 
 
 python finetune_cifar_classifier_vit_ctrl.py       \
-  --pretrained_path ../../autodl-tmp/output_cl_vit_ibot_imagenet100/ebm_gan_checkpoint_130.pth         \
+  --pretrained_path ../../autodl-tmp/output_cl_vit_ibot_imagenet100/ebm_gan_checkpoint_160.pth         \
   --img_size 128         \
   --patch_size 16          \
   --decoder_embed_dim 192         \
   --decoder_num_heads 3         \
   --num_register_tokens 0 \
   --mlflow_experiment_name output_cl_vit_ibot_imagenet100         \
-  --run_name output_cl_vit_ibot_imagenet100_130epoch
+  --run_name output_cl_vit_ibot_imagenet100_160epoch
 
 
 
@@ -513,7 +513,7 @@ python finetune_ctrl_vit_knn.py \
     --patch_size 16 \
     --decoder_embed_dim 192 \
     --use_amp     \
-    --pretrained_path ../../autodl-tmp/output_cl_vit_ibot_imagenet100/ebm_gan_checkpoint_130.pth   \
+    --pretrained_path ../../autodl-tmp/output_cl_vit_ibot_imagenet100/ebm_gan_checkpoint_160.pth   \
     --visualize_features  \
     --num_register_tokens 0
 
@@ -543,14 +543,14 @@ python finetune_cifar_classifier_vit_ctrl.py       \
 
 
 python finetune_cifar_classifier_vit_ctrl.py       \
-  --pretrained_path ../../autodl-tmp/output_ctrl_vit_dual_patch_tcr/ebm_gan_checkpoint_90.pth         \
+  --pretrained_path ../../autodl-tmp/output_ctrl_vit_dual_patch_tcr/ebm_gan_checkpoint_100.pth         \
   --img_size 128         \
   --patch_size 16          \
   --decoder_embed_dim 192         \
   --decoder_num_heads 3         \
   --num_register_tokens 0 \
   --mlflow_experiment_name output_ctrl_vit_dual_patch_tcr         \
-  --run_name output_ctrl_vit_dual_patch_tcr_90epoch
+  --run_name output_ctrl_vit_dual_patch_tcr_100epoch
 
 
 
