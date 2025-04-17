@@ -364,6 +364,9 @@ def train_ebm_gan(args):
         use_checkpoint=args.use_checkpoint
     ).to(device)
     
+    # teacher_discriminator
+    checkpoint = torch.load('../../autodl-tmp/output_cl_vit_ibot_imagenet100/ebm_gan_checkpoint_140.pth')
+    teacher_discriminator.load_state_dict(checkpoint['discriminator_state_dict'],strict=False)
 
 
     # Optimizers
@@ -507,9 +510,9 @@ def train_ebm_gan(args):
                     d_loss.backward()
                     d_optimizer.step()
 
-            with torch.no_grad():
-                for param_q,param_k in zip(discriminator.parameters(),teacher_discriminator.parameters()):
-                    param_k.data = momentum * param_k.data + (1 - momentum) * param_q.data
+            # with torch.no_grad():
+            #     for param_q,param_k in zip(discriminator.parameters(),teacher_discriminator.parameters()):
+            #         param_k.data = momentum * param_k.data + (1 - momentum) * param_q.data
 
             # Train Generator
             g_optimizer.zero_grad()
