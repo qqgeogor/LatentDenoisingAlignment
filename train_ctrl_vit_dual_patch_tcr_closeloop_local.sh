@@ -12,9 +12,10 @@ python train_ctrl_vit_dual_patch_tcr_closeloop.py     \
     --decoder_depth 4 \
     --decoder_num_heads 3 \
     --save_freq 10 \
-    --gp_weight 0.05 \
-    --adv_weight 0.2 \
-    --tcr_weight 1 \
+    --d_adv_weight 0.2 \
+    --g_adv_weight 0.0 \
+    --gp_weight 0.0 \
+    --tcr_weight 0.0 \
     --global_weight 0.0 \
     --temperature 1 \
     --num_workers 8 \

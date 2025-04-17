@@ -570,7 +570,7 @@ def train_ebm_gan(args):
                 
                 fake_samples = generator.patchify(real_samples)*(1-mask.unsqueeze(-1)) + fake_samples*(mask.unsqueeze(-1))
                 
-                fake_samples = generator.unpatchify(fake_samples)
+                fake_samples = generator.unpatchify(fake_samples).detach()#.requires_grad_(True)
                 
                 mask = mask.bool()
                 z_real = z_real[:,1:][mask,:]
@@ -578,7 +578,7 @@ def train_ebm_gan(args):
                 # # Compute energies
                 with torch.no_grad():
                     z_anchor = teacher_discriminator.forward_feature(real_samples).detach()
-                    
+                    z_anchor = discriminator.proj_head(z_anchor)
                     z_anchor = z_anchor[:,1:][mask,:]
 
                     z_anchor = F.layer_norm(z_anchor, (z_anchor.shape[1],))
