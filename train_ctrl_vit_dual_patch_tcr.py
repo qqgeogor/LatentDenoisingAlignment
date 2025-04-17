@@ -579,7 +579,7 @@ def train_ebm_gan(args):
                 realistic_logits = fake_energy - real_energy
                 g_loss = F.softplus(-realistic_logits/args.temperature)
 
-                                
+                
                 # Compute loss
                 realistic_logits_global = fake_energy_global - real_energy_global
                 g_loss_global = F.softplus(-realistic_logits_global/args.temperature)

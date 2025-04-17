@@ -713,6 +713,7 @@ class MaskedAutoencoderViT(nn.Module):
         return x, mask, ids_restore
 
     def forward_encoder_restored(self, x, mask_ratio=0.75):
+        b,c,w,h = x.shape
         x = self.patch_embed(x)
         
         x, mask, ids_restore = self.random_masking(x, mask_ratio)
@@ -728,7 +729,8 @@ class MaskedAutoencoderViT(nn.Module):
         
         
         x = torch.cat([x[:, :1, :], x_], dim=1)
-        x = x + self.pos_embed
+        # x = x + self.pos_embed
+        x = x + self.interpolate_pos_encoding(x, w, h)
         
         
         for blk in self.blocks:
