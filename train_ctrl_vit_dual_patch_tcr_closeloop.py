@@ -505,43 +505,46 @@ def train_ebm_gan(args):
                 
                 with autocast():
                     # Generate fake samples
-                    real_samples = real_samples.detach()#.requires_grad_(True)
-                    z_real, mask, ids_restore = discriminator.forward_encoder_restored(real_samples,mask_ratio=0.75)
+                    real_samples = real_samples.detach().requires_grad_(True)
+                    h_real, mask, ids_restore = discriminator.forward_encoder_restored(real_samples,mask_ratio=0.75)
+                    z_real = discriminator.proj_head(h_real)
                     mask = mask.float()
-                    fake_samples = generator.forward_decoder(z_real)
+                    fake_samples = generator.forward_decoder(h_real)
 
                     fake_samples = generator.patchify(real_samples)*(1-mask.unsqueeze(-1)) + fake_samples*(mask.unsqueeze(-1))
                 
-                    fake_samples = generator.unpatchify(fake_samples).detach()#.requires_grad_(True)
+                    fake_samples = generator.unpatchify(fake_samples).detach().requires_grad_(True)
                     
+                    mask = mask.bool()
+                    z_real = z_real[:,1:][mask,:]
                     # # Compute energies
                     with torch.no_grad():
                         z_anchor = teacher_discriminator.forward_feature(real_samples).detach()
+                        z_anchor = z_anchor[:,1:][mask,:].detach()
+                        z_anchor = F.layer_norm(z_anchor, (z_anchor.shape[1],))
 
-                        
                     z_fake = discriminator.forward_feature(fake_samples)
+                    z_fake = discriminator.proj_head(z_fake)
                     mask = mask.bool()
-                    real_energy = F.cosine_similarity(z_real[:,1:][mask,:], z_anchor[:,1:][mask,:].detach(), dim=1)
-                    fake_energy = F.cosine_similarity(z_fake[:,1:][mask,:], z_anchor[:,1:][mask,:].detach(), dim=1)
-                    # real_energy_global= F.cosine_similarity(z_real[:,0], z_anchor[:,0].detach(), dim=1)
-                    # fake_energy_global= F.cosine_similarity(z_fake[:,0], z_anchor[:,0].detach(), dim=1)
-
+                    z_fake = z_fake[:,1:][mask,:]
+                    
+                    real_energy = -F.smooth_l1_loss(z_real, z_anchor,reduction='none').mean(dim=1)
+                    fake_energy = -F.smooth_l1_loss(z_fake, z_anchor,reduction='none').mean(dim=1)
+                    
+                    loss_cos = 1 - F.cosine_similarity(z_real, z_anchor, dim=1)
                     # # Compute loss
                     realistic_logits = real_energy - fake_energy
                     loss_adv = F.softplus(-realistic_logits/args.temperature).mean()
 
-                    # realistic_logits_global = real_energy_global - fake_energy_global
-                    # d_loss_global = F.softplus(-realistic_logits_global/args.temperature)
 
-                    loss_tcr = -R(z_real[:,1:][mask,:]).mean()
+                    r1 = zero_centered_gradient_penalty(real_samples, real_energy)
+                    r2 = zero_centered_gradient_penalty(fake_samples, fake_energy)
+
+                    # TCR loss  
+                    loss_tcr = -R(z_real).mean()
                     loss_tcr *= 1e-2
 
-                    # # r1 = zero_centered_gradient_penalty((real_samples), real_energy)
-                    # # r2 = zero_centered_gradient_penalty((fake_samples), fake_energy)
-
-                    # d_loss = d_loss.mean() + d_loss_global.mean()*args.global_weight + args.gp_weight/2 * (r1 + r2).mean()
-                    # d_loss = d_loss*args.adv_weight + loss_tcr*args.tcr_weight + (1-real_energy).mean()
-                    d_loss = loss_adv *args.adv_weight + 1 - real_energy.mean() + loss_tcr*args.tcr_weight
+                    d_loss = loss_adv *args.d_adv_weight - real_energy.mean() + loss_tcr*args.tcr_weight + (args.gp_weight/2)*(r1+r2).mean()
                 # Scale and backpropagate
                 scaler_d.scale(d_loss).backward()
                 scaler_d.step(d_optimizer)
@@ -550,52 +553,51 @@ def train_ebm_gan(args):
             with torch.no_grad():
                 for param_q, param_k in zip(discriminator.parameters(), teacher_discriminator.parameters()):
                     param_k.data.mul_(momentum).add_(param_q.data, alpha=1 - momentum)
-
+            
             # Train Generator
             g_optimizer.zero_grad()
             
             with autocast():
                 # Generate new fake samples
                 real_samples = real_samples
-                z_real, mask, ids_restore = discriminator.forward_encoder_restored(real_samples)
+                h_real, mask, ids_restore = discriminator.forward_encoder_restored(real_samples)
+                z_real = discriminator.proj_head(h_real)
                 mask = mask.float()
-                fake_samples = generator.forward_decoder(z_real)
-
-
-                g_loss = F.smooth_l1_loss(fake_samples, generator.patchify(real_samples),reduction='none').mean(-1)
-                g_loss = g_loss.mean()
-
-
-                # fake_samples = generator.patchify(real_samples)*(1-mask.unsqueeze(-1)) + fake_samples*(mask.unsqueeze(-1))
-
-                # fake_samples = generator.unpatchify(fake_samples)
+                fake_samples = generator.forward_decoder(h_real)
+                
+                recon_loss = F.smooth_l1_loss(fake_samples, generator.patchify(real_samples),reduction='none').mean(-1)
+                recon_loss = recon_loss.mean()
+                
+                fake_samples = generator.patchify(real_samples)*(1-mask.unsqueeze(-1)) + fake_samples*(mask.unsqueeze(-1))
+                
+                fake_samples = generator.unpatchify(fake_samples).detach()#.requires_grad_(True)
+                
+                mask = mask.bool()
+                z_real = z_real[:,1:][mask,:]
                 
                 # # Compute energies
-                # with torch.no_grad():
-                #     z_anchor = teacher_discriminator.forward_feature(real_samples).detach()
-                # z_fake = discriminator.forward_feature(fake_samples)
-                # mask = mask.bool()
-                # real_energy = F.cosine_similarity(z_real[:,1:][mask,:], z_anchor[:,1:][mask,:].detach(), dim=1)
-                # real_energy_global= F.cosine_similarity(z_real[:,0], z_anchor[:,0].detach(), dim=1)
-                # fake_energy = F.cosine_similarity(z_fake[:,1:][mask,:], z_anchor[:,1:][mask,:].detach(), dim=1)
-                # fake_energy_global= F.cosine_similarity(z_fake[:,0], z_anchor[:,0].detach(), dim=1)
+                with torch.no_grad():
+                    z_anchor = teacher_discriminator.forward_feature(real_samples).detach()
+                    z_anchor = discriminator.proj_head(z_anchor)
+                    z_anchor = z_anchor[:,1:][mask,:]
+
+                    z_anchor = F.layer_norm(z_anchor, (z_anchor.shape[1],))
+                z_fake = discriminator.forward_feature(fake_samples)
+                z_fake = discriminator.proj_head(z_fake)
+                mask = mask.bool()
+                z_fake = z_fake[:,1:][mask,:]
+                real_energy = -F.smooth_l1_loss(z_real, z_anchor,reduction='none').mean(dim=1)
+                fake_energy = -F.smooth_l1_loss(z_fake, z_anchor,reduction='none').mean(dim=1)
                 
                 # # Compute loss
-                # realistic_logits = fake_energy - real_energy
-                # g_loss = F.softplus(-realistic_logits/args.temperature)
+                realistic_logits = fake_energy - real_energy
+                loss_adv = F.softplus(-realistic_logits/args.temperature).mean()
+                
 
                 
-                # # Compute loss
-                # realistic_logits_global = fake_energy_global - real_energy_global
-                # g_loss_global = F.softplus(-realistic_logits_global/args.temperature)
+                g_loss = recon_loss + loss_adv *args.g_adv_weight
 
-                # loss_tgr = -R(z_fake[:,1:][mask,:]).mean()
-                # loss_tgr *= 1e-2
 
-  
-                # g_loss = g_loss.mean() + g_loss_global.mean()*args.global_weight
-                # g_loss = g_loss*args.adv_weight + loss_tgr*args.tcr_weight
-            
             
             # Scale and backpropagate
             scaler_g.scale(g_loss).backward()
@@ -607,8 +609,11 @@ def train_ebm_gan(args):
                 current_d_lr = d_optimizer.param_groups[0]['lr']
                 print(f'Epoch [{epoch}/{args.epochs}], Step [{i}/{len(trainloader)}], '
                       f'D_loss: {d_loss.item():.4f}, '
-                      'G_loss: {g_loss.item():.4f}' 
-                    #   f'r1: {r1.mean().item():.4f}, r2: {r2.mean().item():.4f}, '
+                      f'G_loss: {g_loss.item():.4f}, ' 
+                      f'r1: {r1.mean().item():.4f}, '
+                      f'r2: {r2.mean().item():.4f}, '
+                      f'loss_cos: {loss_cos.mean().item():.4f}, '
+                      f'adv_loss: {loss_adv.item():.4f}, '
                       f'loss_tcr: {loss_tcr.item():.4f}, '
                       f'Real Energy: {real_energy.mean().item():.4f}, '
                       f'Fake Energy: {fake_energy.mean().item():.4f}, '
@@ -641,9 +646,9 @@ def save_gan_samples(generator, discriminator,pca_noiser, epoch, output_dir, n_s
     batch_size = real_samples.size(0)
     with torch.no_grad():
         
-        z_real,_,_ = discriminator.forward_encoder_restored(real_samples)
-
-        fake_samples = generator.forward_decoder(z_real)
+        h_real,_,_ = discriminator.forward_encoder_restored(real_samples)
+        
+        fake_samples = generator.forward_decoder(h_real)
         fake_samples = generator.unpatchify(fake_samples)
         # Changed 'range' to 'value_range'
         grid = make_grid(fake_samples, nrow=6, normalize=True, value_range=(-1, 1))
@@ -702,7 +707,9 @@ def get_args_parser():
                         help='Weight of gradient penalty')
     parser.add_argument('--noise_scale', default=0.5, type=float,
                         help='Noise scale for PCA noise')
-    parser.add_argument('--adv_weight', default=1.0, type=float,
+    parser.add_argument('--d_adv_weight', default=0.2, type=float,
+                        help='Weight of adversarial loss')
+    parser.add_argument('--g_adv_weight', default=0.2, type=float,
                         help='Weight of adversarial loss')
     parser.add_argument('--base_momentum', default=0.996, type=float,
                         help='Base momentum for momentum scheduler')

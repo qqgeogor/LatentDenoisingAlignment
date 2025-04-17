@@ -507,21 +507,30 @@ def train_ebm_gan(args):
                     # Generate fake samples
                     real_samples = real_samples.detach()#.requires_grad_(True)
                     z_real, mask, ids_restore = discriminator.forward_encoder_restored(real_samples,mask_ratio=0.75)
-                    mask = mask.float()
+                    z_real = discriminator.proj_head(z_real)
+                    mask = mask.bool()
                     # fake_samples = generator.forward_decoder(z_real)
 
                     # fake_samples = generator.patchify(real_samples)*(1-mask.unsqueeze(-1)) + fake_samples*(mask.unsqueeze(-1))
-                
+
                     # fake_samples = generator.unpatchify(fake_samples).detach().requires_grad_(True)
                     
+                    z_real = z_real[:,1:][mask,:]
                     # # Compute energies
                     with torch.no_grad():
                         z_anchor = teacher_discriminator.forward_feature(real_samples).detach()
-  
+                        z_anchor = z_anchor[:,1:][mask,:].detach()
+                        z_anchor = F.layer_norm(z_anchor, (z_anchor.shape[1],))
+
+
+
 
                     # z_fake = discriminator.forward_feature(fake_samples)
-                    mask = mask.bool()
-                    real_energy = F.cosine_similarity(z_real[:,1:][mask,:], z_anchor[:,1:][mask,:].detach(), dim=1)
+                    
+                    real_energy = F.cosine_similarity(z_real, z_anchor, dim=1)
+
+                    loss_smooth = F.smooth_l1_loss(z_real, z_anchor,reduction='none')
+                    loss_smooth = loss_smooth.mean(dim=1).mean()
                     # fake_energy = F.cosine_similarity(z_fake[:,1:][mask,:], z_anchor[:,1:][mask,:].detach(), dim=1)
                     # real_energy_global= F.cosine_similarity(z_real[:,0], z_anchor[:,0].detach(), dim=1)
                     # fake_energy_global= F.cosine_similarity(z_fake[:,0], z_anchor[:,0].detach(), dim=1)
@@ -533,7 +542,7 @@ def train_ebm_gan(args):
                     # realistic_logits_global = real_energy_global - fake_energy_global
                     # d_loss_global = F.softplus(-realistic_logits_global/args.temperature)
 
-                    loss_tcr = -R(z_real[:,1:][mask,:]).mean()
+                    loss_tcr = -R(z_real).mean()
                     loss_tcr *= 1e-2
 
                     # # r1 = zero_centered_gradient_penalty((real_samples), real_energy)
@@ -541,7 +550,7 @@ def train_ebm_gan(args):
 
                     # d_loss = d_loss.mean() + d_loss_global.mean()*args.global_weight + args.gp_weight/2 * (r1 + r2).mean()
                     # d_loss = d_loss*args.adv_weight + loss_tcr*args.tcr_weight + (1-real_energy).mean()
-                    d_loss = 1 - real_energy.mean() + loss_tcr*args.tcr_weight
+                    d_loss = loss_smooth + loss_tcr*args.tcr_weight
                 # Scale and backpropagate
                 scaler_d.scale(d_loss).backward()
                 scaler_d.step(d_optimizer)

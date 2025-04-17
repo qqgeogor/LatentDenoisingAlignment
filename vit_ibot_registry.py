@@ -611,6 +611,8 @@ class MaskedAutoencoderViT(nn.Module):
     
 
 
+
+
     def forward_predictor(self, x, masks_x=None, masks=None):
 
         if not isinstance(masks_x, list):
@@ -740,6 +742,47 @@ class MaskedAutoencoderViT(nn.Module):
 
         return x, mask, ids_restore
     
+    
+    
+    def forward_encoder_predictor_restored(self, x, mask_ratio=0.75):
+        x = self.patch_embed(x)
+        x = x + self.pos_embed[:, 1:, :]
+        x, mask, ids_restore = self.random_masking(x, mask_ratio)
+
+        cls_token = self.cls_token + self.pos_embed[:, :1, :]
+        cls_tokens = cls_token.expand(x.shape[0], -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+
+
+        
+        
+        
+        for blk in self.blocks:
+            if self.use_checkpoint and self.training:
+                x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
+            else:
+                x = blk(x)
+        x = self.norm(x)
+
+        
+        mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
+        x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)
+        x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))
+        
+        x = torch.cat([x[:, :1, :], x_], dim=1)
+
+        x = x + self.decoder_pos_embed
+
+        for blk in self.decoder_blocks:
+            if self.use_checkpoint and self.training:
+                x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
+            else:
+                x = blk(x)
+        x = self.decoder_norm(x)
+        
+
+
+        return x, mask, ids_restore
 
     # def forward_predictor(self, x):
     #     x = self.decoder_embed(x)
