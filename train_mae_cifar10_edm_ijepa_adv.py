@@ -28,6 +28,21 @@ os.environ['MPLBACKEND'] = 'Agg'  # Set this before importing matplotlib
 import matplotlib.pyplot as plt
 
 
+def R(Z,eps=0.5):
+    c = Z.shape[-1]
+    b = Z.shape[-2]
+    
+    Z = F.normalize(Z, p=2, dim=-1)
+    cov = Z.T @ Z
+    I = torch.eye(cov.size(-1)).to(Z.device)
+    alpha = c/(b*eps)
+    
+    cov = alpha * cov +  I
+
+    out = 0.5*torch.logdet(cov)
+    return out.mean()
+
+
 class MaskedAutoencoderViT(nn.Module):
     def __init__(self, img_size=32, patch_size=4, in_chans=3,
                  embed_dim=192, depth=12, num_heads=3,
@@ -830,7 +845,8 @@ def train_mae():
                 fake_energy = F.cosine_similarity(z_fake_cls,z_anchor_cls,dim=-1)
                 
                 relativistic_energy = real_energy - fake_energy
-                loss_adv = F.softplus(-relativistic_energy).mean()
+                loss_tcr =  - R(z_pred_cls)*1e-2
+                loss_adv = F.softplus(-relativistic_energy).mean()+loss_tcr
                 
                 loss = loss_ijepa + loss_edm + loss_adv*args.adv_weight
 
@@ -858,6 +874,7 @@ def train_mae():
                       f'Loss_ijepa: {loss_ijepa:.3f}, '
                       f'Loss_edm: {loss_edm:.3f}, '
                       f'Loss_adv: {loss_adv:.3f}, '
+                      f'Loss_tcr: {loss_tcr:.3f}, '
                       f'real_energy: {real_energy.mean():.3f}, '
                       f'fake_energy: {fake_energy.mean():.3f}, '
                       f'LR: {current_lr:.6f}')
