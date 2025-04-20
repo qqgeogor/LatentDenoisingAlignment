@@ -564,3 +564,161 @@ python finetune_cifar_classifier_vit_ctrl.py       \
   --num_register_tokens 0 \
   --mlflow_experiment_name output_ctrl_vit_dual_patch_tcr_gan         \
   --run_name output_ctrl_vit_dual_patch_tcr_gan_10epoch
+
+
+
+
+python finetune_cifar_classifier_vit_hldae_tiny.py     \
+    --pretrained_path ../../autodl-tmp/output_edm_ijepa_adv_imagenet100/checkpoint_epoch_200.pth     \
+    --img_size 128     \
+    --patch_size 16      \
+    --decoder_embed_dim 192     \
+    --decoder_num_heads 3     \
+    --mlflow_experiment_name edm_ijepa_adv_imagenet100     \
+    --run_name edm_ijepa_adv_imagenet100_200epoch
+
+
+python finetune_cifar_classifier_vit_hldae_tiny.py     \
+    --pretrained_path ../../autodl-tmp/output_edm_imagenet100/checkpoint_epoch_200.pth     \
+    --img_size 128     \
+    --patch_size 16      \
+    --decoder_embed_dim 192     \
+    --decoder_num_heads 3     \
+    --mlflow_experiment_name edm_ijepa_imagenet100     \
+    --run_name edm_ijepa_imagenet100_200epoch
+
+
+
+
+python finetune_cifar_classifier_vit_hldae_tiny.py     \
+    --pretrained_path /mnt/d/repo/output/output_edm_ijepa_adv_imagenet100/checkpoint_epoch_200.pth     \
+    --img_size 128     \
+    --patch_size 16      \
+    --decoder_embed_dim 192     \
+    --decoder_num_heads 3     \
+    --mlflow_experiment_name output_edm_ijepa_adv_imagenet100     \
+    --run_name output_edm_ijepa_adv_imagenet100_200epoch
+
+
+
+
+python finetune_vit_knn.py \
+    --latent_dim 192     \
+    --img_size 128 \
+    --patch_size 16 \
+    --decoder_embed_dim 192 \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_edm_imagenet100/checkpoint_epoch_200.pth   \
+    --visualize_features 
+
+
+python finetune_vit_knn.py \
+    --latent_dim 192     \
+    --img_size 128 \
+    --patch_size 16 \
+    --decoder_embed_dim 192 \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_edm_ijepa_adv_imagenet100/checkpoint_epoch_200.pth   \
+    --visualize_features 
+
+
+
+
+
+
+python finetune_cifar_classifier_vit_hldae_tiny.py     \
+    --pretrained_path /mnt/d/repo/output/output_edm_ijepa_tcr_imagenet100/checkpoint_epoch_40.pth     \
+    --img_size 128     \
+    --patch_size 16      \
+    --decoder_embed_dim 192     \
+    --decoder_num_heads 3     \
+    --mlflow_experiment_name output_edm_ijepa_tcr_imagenet100     \
+    --run_name output_edm_ijepa_tcr_imagenet100_40epoch
+
+
+
+python finetune_cifar_classifier_vit_hldae_tiny.py     \
+    --pretrained_path ../../autodl-tmp/output_edm_ijepa_adv_vit_small_imagenet100/checkpoint_epoch_100.pth     \
+    --img_size 224     \
+    --patch_size 16      \
+    --embed_dim 384 \
+    --decoder_embed_dim 384 \
+    --num_heads 6 \
+    --decoder_num_heads 6 \
+    --mlp_ratio 4 \
+    --depth 12 \
+    --decoder_depth 4 \
+    --mlflow_experiment_name output_edm_ijepa_adv_vit_small_imagenet100     \
+    --run_name output_edm_ijepa_adv_vit_small_imagenet100_100epoch
+
+
+
+
+
+python finetune_cifar_classifier_vit_hldae_tiny.py     \
+    --pretrained_path /mnt/d/repo/output/output_vit_ldae_dino_self_dist/checkpoint_epoch_30.pth     \
+    --img_size 128     \
+    --patch_size 16      \
+    --decoder_embed_dim 96\
+    --decoder_num_heads 3     \
+    --mlflow_experiment_name output_vit_ldae_dino_self_dist     \
+    --run_name output_vit_ldae_dino_self_dist_30epoch
+
+
+
+
+
+python finetune_ctrl_vit_knn.py \
+    --latent_dim 192     \
+    --img_size 32 \
+    --patch_size 4 \
+    --depth 6 \
+    --decoder_embed_dim 192 \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ctrl_ldr_ema_cos_cl_vit_imagenet100_32/ebm_gan_checkpoint_90.pth   \
+    --visualize_features 
+
+
+
+
+
+
+python finetune_cifar_classifier_vit_noprop.py     \
+    --pretrained_path ../../autodl-fs/output_mae_noprop3/checkpoint_epoch_79.pth     \
+    --img_size 128     \
+    --patch_size 16      \
+    --decoder_embed_dim 96\
+    --decoder_num_heads 3     \
+    --mlflow_experiment_name noprop3     \
+    --run_name noprop3_79epoch \
+    --T 1 \
+    --decoder_depth 4
+
+
+
+
+python finetune_cifar_classifier_vit_noprop.py     \
+    --pretrained_path ../../autodl-fs/output_mae_noprop/checkpoint_epoch_79.pth     \
+    --img_size 128     \
+    --patch_size 16      \
+    --decoder_embed_dim 96\
+    --decoder_num_heads 3     \
+    --mlflow_experiment_name noprop1     \
+    --run_name noprop1_79epoch \
+    --T 4 \
+    --decoder_depth 1
+
+
+
+
+python finetune_cifar_classifier_vit_noprop.py     \
+    --pretrained_path ../../autodl-fs/output_mae_noprop2/checkpoint_epoch_79.pth     \
+    --img_size 128     \
+    --patch_size 16      \
+    --decoder_embed_dim 96\
+    --decoder_num_heads 3     \
+    --mlflow_experiment_name noprop2     \
+    --run_name noprop2_79epoch \
+    --T 10 \
+    --decoder_depth 2 \
+    --use_amp

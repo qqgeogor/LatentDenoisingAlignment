@@ -1,0 +1,12 @@
+python train_mae_cifar10_noprop_mae.py \
+    --use_amp \
+    --output_dir ../../autodl-fs/output_mae_noprop_mae/  \
+    --img_size 128 \
+    --patch_size 16 \
+    --dataset 'tiny-imagenet' \
+    --data_path '../../autodl-tmp/tiny-imagenet-200/train' \
+    --mask_ratio 0.75 \
+    --T 1 \
+    --vis_type stochastic \
+    --decoder_depth 4 \
+    --save_freq 20 

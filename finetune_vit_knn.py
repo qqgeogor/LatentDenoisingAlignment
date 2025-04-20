@@ -28,7 +28,7 @@ def extract_features(model, dataloader, device, use_amp=True):
             # Get embeddings with optional AMP
             with autocast(enabled=use_amp):
                 # Use encoder to get features
-                features = model.forward_feature(images)[:,0]
+                features = model.forward_feature(images)[:,1:].mean(1)
                 embeddings = F.normalize(features, p=2, dim=1)
             
             # Store features and labels

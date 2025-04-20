@@ -53,6 +53,9 @@ class MultiViewTransform:
             views.append(self.base_transform(x))
 
         return views
+    
+
+    
 def R(Z,eps=0.5):
     c = Z.shape[-1]
     b = Z.shape[-2]
@@ -265,21 +268,35 @@ def train_ebm_gan(args):
     # Initialize AMP scaler
     d_scaler = GradScaler()
     g_scaler = GradScaler()
+    
+    # imagenet100   
     transform = transforms.Compose([
-        transforms.RandomResizedCrop(32, scale=(0.2, 1.0)),
+        # transforms.Resize(int(args.img_size*1.14)),
+        # transforms.CenterCrop(args.img_size),
+        transforms.RandomResizedCrop(args.img_size, scale=(0.5, 1.0)),
         transforms.RandomHorizontalFlip(),
         transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
         transforms.RandomGrayscale(p=0.2),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], 
-                            std=[0.5, 0.5, 0.5])
+        # image net normalization
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                                std=[0.229, 0.224, 0.225])
     ])
-    
+
+    # cifar10
     transform = MultiViewTransform(transform,n_views=2)
-    
+
     # Load CIFAR-10
-    trainset = torchvision.datasets.CIFAR10(root=args.data_path, train=True,
+    if args.dataset == 'imagenet100':
+        print('dataset',args.dataset)
+        print('dataset loaded',args.data_path)
+
+        trainset = torchvision.datasets.ImageFolder(root=args.data_path, transform=transform)
+        
+    else:
+        trainset = torchvision.datasets.CIFAR10(root=args.data_path, train=True,
                                           download=True, transform=transform)
+        
     
     # Filter the dataset to only include class 1
     if args.cls!=-1:
@@ -369,7 +386,7 @@ def train_ebm_gan(args):
                     z1 = discriminator.net(real_samples).squeeze()
                     # z2 = discriminator.net(aug_samples).squeeze()
                     with torch.no_grad():
-                        z_anchor = teacher_discriminator.net(real_samples.detach()).squeeze()
+                        z_anchor = teacher_discriminator.net(aug_samples.detach()).squeeze()
                         z_anchor = z_anchor.detach()
 
                     # z_anchor = z2.detach()
@@ -386,7 +403,7 @@ def train_ebm_gan(args):
                     loss_dino = loss_tcr+loss_cos
 
                     real_samples = real_samples.detach().requires_grad_(True)
-                    # z = discriminator.net(real_samples).squeeze()
+                    z = discriminator.net(real_samples).squeeze()
                     
                     # z_noised = pca_noiser(z)
                     
@@ -442,7 +459,7 @@ def train_ebm_gan(args):
                 z = z.detach()
                 z = discriminator.net(real_samples).squeeze()
                 with torch.no_grad():
-                    z_anchor = teacher_discriminator.net(real_samples.detach()).squeeze()
+                    z_anchor = teacher_discriminator.net(aug_samples.detach()).squeeze()
                     z_anchor = z_anchor.detach()
                     
 
@@ -560,8 +577,10 @@ def compute_gradient_penalty(discriminator, real_samples, fake_samples, device):
 
 def get_args_parser():
     parser = argparse.ArgumentParser('EBM-GAN training for CIFAR-10')
-    
+    parser.add_argument('--dataset', default='cifar10', type=str,
+                        help='Dataset to train on')
     # Add GAN-specific parameters
+    parser.add_argument('--img_size', default=32, type=int)
     parser.add_argument('--latent_dim', default=128, type=int)
     parser.add_argument('--g_lr', default=1e-4, type=float)
     parser.add_argument('--d_lr', default=1e-4, type=float)

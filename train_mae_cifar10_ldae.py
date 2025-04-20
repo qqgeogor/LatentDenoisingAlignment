@@ -5,7 +5,8 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from functools import partial
 import numpy as np
-from timm.models.vision_transformer import PatchEmbed, Block
+from timm.models.vision_transformer import Block,PatchEmbed
+from utils_ibot import MultiScaleSVDPatchPCANoise 
 from timm.models.layers import trunc_normal_
 import os
 import matplotlib.pyplot as plt
@@ -17,7 +18,22 @@ from pathlib import Path
 import math
 from timm.scheduler.cosine_lr import CosineLRScheduler
 from timm.optim import create_optimizer_v2
-#
+from karas_sampler import KarrasSampler,get_sigmas_karras
+from einops import rearrange
+import seaborn as sns
+import os
+os.environ['MPLBACKEND'] = 'Agg'  # Set this before importing matplotlib
+import matplotlib.pyplot as plt
+
+import matplotlib
+matplotlib.use('Agg')  # Set this before importing pyplot
+import matplotlib.pyplot as plt
+from torch.nn import init
+import torch.nn.functional as F
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 class MaskedAutoencoderViT(nn.Module):
     def __init__(self, img_size=32, patch_size=4, in_chans=3,
@@ -26,9 +42,22 @@ class MaskedAutoencoderViT(nn.Module):
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, use_checkpoint=False):
         super().__init__()
         self.use_checkpoint = use_checkpoint
+        self.embed_dim = embed_dim
+        self.patch_size = patch_size    
+        self.num_patches = (img_size // patch_size) ** 2
+        self.img_size = img_size
+        self.depth = depth
+        self.num_heads = num_heads
+        self.mlp_ratio = mlp_ratio
+        self.decoder_embed_dim = decoder_embed_dim
+        self.decoder_depth = decoder_depth
+        self.decoder_num_heads = decoder_num_heads
+        
         # --------------------------------------------------------------------------
         # MAE encoder specifics
+        print(img_size, patch_size, in_chans, embed_dim)
         self.patch_embed = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
+        self.patch_embed_decoder = PatchEmbed(img_size, patch_size, in_chans, decoder_embed_dim)
         num_patches = self.patch_embed.num_patches
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
@@ -39,7 +68,7 @@ class MaskedAutoencoderViT(nn.Module):
             for i in range(depth)])
         self.norm = norm_layer(embed_dim)
         # --------------------------------------------------------------------------
-
+        
         # --------------------------------------------------------------------------
         # MAE decoder specifics
         self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
@@ -59,6 +88,12 @@ class MaskedAutoencoderViT(nn.Module):
         self.norm_pix_loss = norm_pix_loss
         self.patch_size = patch_size
         self.initialize_weights()
+        self.sampler = KarrasSampler(
+            sigma_min=0.002,
+            sigma_max=80.0,
+            rho=7.0,
+            num_steps=40
+        )
 
     def initialize_weights(self):
         # Initialize position embeddings
@@ -122,38 +157,55 @@ class MaskedAutoencoderViT(nn.Module):
 
         ids_keep = ids_shuffle[:, :len_keep]
         x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
-
+        
         mask = torch.ones([N, L], device=x.device)
         mask[:, :len_keep] = 0
         mask = torch.gather(mask, dim=1, index=ids_restore)
 
         return x_masked, mask, ids_restore
 
-    def forward_encoder(self, x, mask_ratio):
+
+    def forward_feature(self, x):
         x = self.patch_embed(x)
         x = x + self.pos_embed[:, 1:, :]
-        x, mask, ids_restore = self.random_masking(x, mask_ratio)
 
         cls_token = self.cls_token + self.pos_embed[:, :1, :]
         cls_tokens = cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
 
         for blk in self.blocks:
-            if self.use_checkpoint:
+            if self.use_checkpoint and self.training:
                 x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
             else:
                 x = blk(x)
         x = self.norm(x)
+        return x
 
+    def forward_encoder(self, x, mask_ratio):
+        x = self.patch_embed(x)
+        x = x + self.pos_embed[:, 1:, :]
+        _, mask, ids_restore = self.random_masking(x, mask_ratio)
+
+        cls_token = self.cls_token + self.pos_embed[:, :1, :]
+        cls_tokens = cls_token.expand(x.shape[0], -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+
+        idx = 0
+        for blk in self.blocks:
+            if self.use_checkpoint and self.training:                
+                x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
+            else:
+                x = blk(x)
+            idx += 1
+        x = self.norm(x)
+        
         return x, mask, ids_restore
 
-    def forward_decoder(self, x, ids_restore):
-        x = self.decoder_embed(x)
+    def sample(self, x):
+        return self.sampler.sample(x)
 
-        mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
-        x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)
-        x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))
-        x = torch.cat([x[:, :1, :], x_], dim=1)
+    def forward_decoder(self, x,noised_image, mask,ids_restore):
+        x = self.decoder_embed(x)
 
         x = x + self.decoder_pos_embed
 
@@ -168,7 +220,7 @@ class MaskedAutoencoderViT(nn.Module):
 
         return x
 
-    def forward_loss(self, imgs, pred, mask):
+    def forward_loss(self, imgs, pred, mask,weightings=None):
         target = self.patchify(imgs)
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
@@ -177,14 +229,78 @@ class MaskedAutoencoderViT(nn.Module):
 
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)
-        loss = (loss * mask).sum() / mask.sum()
+        if weightings is not None:
+            loss = loss * weightings.view(-1,1)
+        loss = loss.mean()
         return loss
 
     def forward(self, imgs, mask_ratio=0.75):
         latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio)
-        pred = self.forward_decoder(latent, ids_restore)
-        loss = self.forward_loss(imgs, pred, mask)
+        
+        noised_image,sigma = self.sampler.add_noise(imgs)
+        
+        snrs = sigma**-2
+        weightings = snrs + 1.0
+        
+        snrs = -2*torch.log(sigma)
+        # snrs = torch.exp(snrs)
+        weightings = snrs + 1.0
+        weightings = torch.ones_like(weightings)
+        
+        # print('snrs',snrs.min(),snrs.max())
+        # print('sigma',sigma.min(),sigma.max())
+        # exit()
+        
+        pred = self.forward_decoder(latent, noised_image, mask, ids_restore)
+        loss = self.forward_loss(imgs, pred, mask,weightings)
         return loss, pred, mask
+    
+    
+    def denoise(self, noised_image, latent, mask,ids_restore,sigma):
+        
+        pred = self.forward_decoder(latent, noised_image, mask, ids_restore)
+        pred = self.unpatchify(pred)
+        return pred
+    
+
+    def get_attention_maps(self, x, layer_idx=-1):
+        """
+        Get attention maps from a specific transformer layer
+        Args:
+            x: Input tensor
+            layer_idx: Index of transformer layer to visualize (-1 for last layer)
+        Returns:
+            attention_maps: [B, H, N, N] attention weights
+        """
+        B = x.shape[0]
+        
+        # Get patches
+        x = self.patch_embed(x)
+        
+        # Add positional embeddings
+        x = x + self.pos_embed[:, 1:, :]
+        
+        # Add cls token
+        cls_token = self.cls_token + self.pos_embed[:, :1, :]
+        cls_tokens = cls_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        
+        # Pass through transformer blocks until target layer
+        target_block = self.blocks[layer_idx]
+        
+        # Get attention weights from target block
+        with torch.no_grad():
+            # Forward pass until attention
+            attn = target_block.attn
+            qkv = attn.qkv(x)
+            qkv = rearrange(qkv, 'b n (h d qkv) -> qkv b h n d', h=attn.num_heads, qkv=3)
+            q, k, v = qkv[0], qkv[1], qkv[2]   # b h n d
+            
+            # Calculate attention weights
+            attn_weights = (q @ k.transpose(-2, -1)) * attn.scale
+            attn_weights = attn_weights.softmax(dim=-1)  # b h n n
+            
+        return attn_weights
 
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
     """Generate 2D sinusoidal position embedding."""
@@ -229,19 +345,73 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
     return emb
 
-def visualize_reconstruction(model, images, mask_ratio=0.75, save_path='reconstructions'):
-    """Visualize original, masked, and reconstructed images"""
-    # Create save directory if it doesn't exist
+
+def visualize_attention(model, images, save_path='attention_maps', layer_idx=-1):
+    """Visualize attention maps for given images"""
     os.makedirs(save_path, exist_ok=True)
     
     model.eval()
     with torch.no_grad():
+        # Get attention weights
+        attn_weights = model.get_attention_maps(images, layer_idx=layer_idx)
+        
+        # Average over heads
+        attn_weights = attn_weights.mean(dim=1)  # [B, N, N]
+        
+        # Plot attention maps
+        n_images = min(4, images.shape[0])
+        fig, axes = plt.subplots(2, n_images, figsize=(4*n_images, 8))
+        
+        for i in range(n_images):
+            # Plot original image
+            img = images[i].cpu()
+            mean = torch.tensor([0.4914, 0.4822, 0.4465]).view(3, 1, 1)
+            std = torch.tensor([0.2023, 0.1994, 0.2010]).view(3, 1, 1)
+            img = img * std + mean
+            img = torch.clamp(img, 0., 1.)
+            axes[0, i].imshow(img.permute(1, 2, 0))
+            axes[0, i].axis('off')
+            axes[0, i].set_title('Original Image')
+            
+            # Plot attention map
+            attn = attn_weights[i].cpu()
+            sns.heatmap(attn.numpy(), ax=axes[1, i], cmap='viridis')
+            axes[1, i].set_title('Attention Map')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_path, f'attention_map_layer_{layer_idx}.png'))
+        plt.close()
+        
+        return attn_weights
+    
+
+def visualize_reconstruction(model, images, mask_ratio=0.75, save_path='reconstructions',noise_scale=1.,pca_noiser=None):
+    """Visualize original, masked, and reconstructed images"""
+    # Create save directory if it doesn't exist
+    os.makedirs(save_path, exist_ok=True)
+    noised_images,pca_noise = pca_noiser(images,return_patches=True)
+    model.eval()
+    with torch.no_grad():
         # Get reconstruction and mask
-        loss, pred, mask = model(images, mask_ratio)
+
+        latent,mask,ids_restore = model.forward_encoder(noised_images,mask_ratio)
+        noised_x = torch.randn_like(noised_images)*model.sampler.sigma_max
+        sigmas = get_sigmas_karras(1, model.sampler.sigma_min, model.sampler.sigma_max, rho=model.sampler.rho, device="cpu")
         
-        # Convert predictions to images
-        pred = model.unpatchify(pred)
+        pred1 = model.denoise(noised_x,latent,mask,ids_restore,sigmas[0])
         
+        # pred1 = (1-mask.unsqueeze(-1)) * model.patchify(noised_images) + mask.unsqueeze(-1) * model.patchify(pred1)
+        # pred1 = model.unpatchify(pred1)
+        
+        # pred3 = pred2 = pred1
+
+        pred2 = pca_noise
+        pred3 = noised_images - pred1
+        # sigmas = get_sigmas_karras(40, model.sampler.sigma_min, model.sampler.sigma_max, rho=model.sampler.rho, device="cpu")
+        # pred2,_ = model.sampler.stochastic_iterative_sampler(model,noised_images,sigmas=sigmas,mask_ratio=mask_ratio,latent=latent,mask=mask,ids_restore=ids_restore)
+        
+        # pred3,_ = model.sampler.sample_heun(model,noised_images,sigmas=sigmas,mask_ratio=mask_ratio,latent=latent,mask=mask,ids_restore=ids_restore)
+
         # Create masked images
         masked_images = images.clone()
         
@@ -252,7 +422,7 @@ def visualize_reconstruction(model, images, mask_ratio=0.75, save_path='reconstr
         masked_images = masked_images * (1 - mask.unsqueeze(1).float())
         
         # Normalize images for visualization
-        def normalize_image(img):
+        def denormalize_image(img):
             img = img.cpu()
             # Denormalize from CIFAR-10 normalization
             mean = torch.tensor([0.4914, 0.4822, 0.4465]).view(3, 1, 1)
@@ -261,21 +431,36 @@ def visualize_reconstruction(model, images, mask_ratio=0.75, save_path='reconstr
             img = torch.clamp(img, 0., 1.)
             return img
         
-        # Prepare images for grid
-        images = normalize_image(images)
-        masked_images = normalize_image(masked_images)
-        pred = normalize_image(pred)
+        # Normalize images for visualization
+        def denormalize_image(img):
+            img = img.cpu()
+            # Denormalize from CIFAR-10 normalization
+            mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+            img = img * std + mean
+            img = torch.clamp(img, 0., 1.)
+            return img
         
+        # Prepare images for grid
+        images = denormalize_image(images)
+        noised_images = denormalize_image(noised_images)
+        pred1 = denormalize_image(pred1)
+        pred2 = denormalize_image(pred2)  
+        pred3 = denormalize_image(pred3)
+
         # Create image grid
         n_images = min(8, images.size(0))
         comparison = torch.cat([
             images[:n_images],
-            masked_images[:n_images],
-            pred[:n_images]
+            noised_images[:n_images],
+            pred1[:n_images],
+            pred2[:n_images],
+            pred3[:n_images],
         ])
         
         grid = make_grid(comparison, nrow=n_images, padding=2, normalize=False)
-        return grid
+    model.train()
+    return grid
 
 def save_model(model, optimizer, scheduler, epoch, loss, save_dir='checkpoints'):
     """Save model checkpoint"""
@@ -304,33 +489,31 @@ def load_checkpoint(model, optimizer, scheduler, checkpoint_path):
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if scheduler and checkpoint['scheduler_state_dict']:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        if 'scaler_state_dict' in checkpoint:  # Load scaler state if it exists
-            scaler = GradScaler()
-            scaler.load_state_dict(checkpoint['scaler_state_dict'])
-        else:
-            scaler = GradScaler()
+        # if 'scaler_state_dict' in checkpoint:  # Load scaler state if it exists
+        #     scaler = GradScaler()
+        #     scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        # else:
         start_epoch = checkpoint['epoch'] + 1
         print(f"Resuming from epoch {start_epoch}")
         return start_epoch
     return 0
 
-
-
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE training for CIFAR-10', add_help=False)
     
     # Add dataset arguments
-    parser.add_argument('--dataset', default='cifar10', type=str, choices=['cifar10', 'tiny-imagenet','imagenet-100'],
+    parser.add_argument('--dataset', default='imagenet-100', type=str, choices=['cifar10', 'tiny-imagenet','imagenet-100'],
                         help='Dataset to use (cifar10 or tiny-imagenet or imagenet-100 )')
-    parser.add_argument('--data_path', default='c:/dataset', type=str,
+    parser.add_argument('--data_path', default='/mnt/d/datasets/imagenet100/train', type=str,
                         help='Path to dataset root directory')
-
+    parser.add_argument('--noise_scale', default=((1/3.)**0.5), type=float,
+                        help='Noise scale for PCA noise')
     # Model parameters
     parser.add_argument('--model_name', default='mae_base', type=str,
                         help='Name of the model configuration')
-    parser.add_argument('--img_size', default=32, type=int,
+    parser.add_argument('--img_size', default=128, type=int,
                         help='Input image size')
-    parser.add_argument('--patch_size', default=4, type=int,
+    parser.add_argument('--patch_size', default=16, type=int,
                         help='Patch size for image tokenization')
     parser.add_argument('--embed_dim', default=192, type=int,
                         help='Embedding dimension')
@@ -361,6 +544,9 @@ def get_args_parser():
     parser.add_argument('--warmup_epochs', default=10, type=int,
                         help='Number of epochs for warmup')
     
+    parser.add_argument('--noiser_patch_size', default=16, type=int,
+                    help='Patch size for Noiser')
+
     # System parameters
     parser.add_argument('--num_workers', default=8, type=int,
                         help='Number of data loading workers')
@@ -368,15 +554,15 @@ def get_args_parser():
                         help='Device to use for training')
     parser.add_argument('--seed', default=0, type=int,
                         help='Random seed')
-    parser.add_argument('--use_amp', action='store_true',
+    parser.add_argument('--use_amp', action='store_true',default=False,
                         help='Use mixed precision training')
-    parser.add_argument('--use_checkpoint', action='store_true',
+    parser.add_argument('--use_checkpoint', action='store_true',default=False,
                         help='Use gradient checkpointing to save memory')
     
     # Logging and saving
-    parser.add_argument('--output_dir', default='F:/output/mae_cifar10_ddpm',
+    parser.add_argument('--output_dir', default='/mnt/d/repo/output/mae_cifar10_hldae_imagenet100',
                         help='Path where to save checkpoints and logs')
-    parser.add_argument('--save_freq', default=20, type=int,
+    parser.add_argument('--save_freq', default=10, type=int,
                         help='Frequency of saving checkpoints')
     parser.add_argument('--log_freq', default=100, type=int,
                         help='Frequency of logging training progress')
@@ -401,7 +587,7 @@ def get_args_parser():
     parser.add_argument('--opt-eps', default=1e-8, type=float, metavar='EPSILON',
                         help='Optimizer Epsilon (default: 1e-8)')
     parser.add_argument('--opt-betas', default=[0.5, 0.999], type=float, nargs='+',
-                        help='Optimizer Betas (default: [0.9, 0.999])')
+                        help='Optimizer Betas (default: [0.5, 0.999])')
     parser.add_argument('--clip-grad', type=float, default=None, metavar='NORM',
                         help='Clip gradient norm (default: None, no clipping)')
     parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
@@ -446,14 +632,18 @@ def train_mae():
         
         # Load Tiny ImageNet dataset using ImageFolder
         trainset = torchvision.datasets.ImageFolder(
-            root=os.path.join(args.data_path),
+            root=args.data_path,
             transform=transform
         )
 
     trainloader = DataLoader(trainset, batch_size=args.batch_size,
                            shuffle=True, num_workers=args.num_workers)
 
+    pca_noiser = MultiScaleSVDPatchPCANoise(patch_size=args.noiser_patch_size, noise_scale=args.noise_scale)
+    
     # Initialize model
+    print('use_checkpoint',args.use_checkpoint)
+    print('use_amp',args.use_amp)
     model = MaskedAutoencoderViT(
         img_size=args.img_size,
         patch_size=args.patch_size,
@@ -475,7 +665,7 @@ def train_mae():
         weight_decay=args.weight_decay,
         momentum=args.momentum,
         eps=args.opt_eps,
-        betas=tuple(args.opt_betas) if args.opt_betas else (0.9, 0.999),  # Provide default tuple
+        betas=tuple(args.opt_betas) if args.opt_betas else (0.5, 0.999),  # Provide default tuple
     )
     
     # Use timm's CosineLRScheduler
@@ -502,8 +692,6 @@ def train_mae():
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             if 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict']:
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            if 'scaler_state_dict' in checkpoint and checkpoint['scaler_state_dict']:
-                scaler.load_state_dict(checkpoint['scaler_state_dict'])
             args.start_epoch = checkpoint['epoch'] + 1
             print(f"Resuming from epoch {args.start_epoch}")
         else:
@@ -513,8 +701,8 @@ def train_mae():
     best_loss = float('inf')
 
     imgs = next(iter(trainloader))[0]
-    grid = visualize_reconstruction(model, imgs[:8].to(device))
-
+    grid = visualize_reconstruction(model, imgs[:8].to(device),noise_scale=args.noise_scale,pca_noiser=pca_noiser)
+    
     plt.figure(figsize=(15, 5))
     plt.imshow(grid.permute(1, 2, 0))
     plt.axis('off')
@@ -533,17 +721,29 @@ def train_mae():
         
         for i, (imgs, _) in enumerate(trainloader):
             imgs = imgs.to(device)
-            
             optimizer.zero_grad()
-            
+            noised_imgs,pca_noise = pca_noiser(imgs,return_patches=True)            
             if args.use_amp:
                 with autocast():
-                    loss, pred, mask = model(imgs, mask_ratio=args.mask_ratio)
+                    
+                    _, pred, _ = model(noised_imgs, mask_ratio=args.mask_ratio)
+                
+                    loss = (pred - model.patchify(pca_noise))**2
+                    loss = loss.mean(-1)
+                    loss = loss.mean()
+
+
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                loss, pred, mask = model(imgs, mask_ratio=args.mask_ratio)
+                
+                _, pred, _ = model(noised_imgs, mask_ratio=args.mask_ratio)
+                
+                loss = (pred - model.patchify(pca_noise))**2
+                loss = loss.mean(-1)
+                loss = loss.mean()
+
                 loss.backward()
                 optimizer.step()
             
@@ -562,11 +762,7 @@ def train_mae():
         
         # Visualize reconstructions
         with torch.no_grad():
-            if args.use_amp:
-                with autocast():
-                    grid = visualize_reconstruction(model, imgs[:8].to(device))
-            else:
-                grid = visualize_reconstruction(model, imgs[:8].to(device))
+            grid = visualize_reconstruction(model, imgs[:8].to(device),noise_scale=args.noise_scale,pca_noiser=pca_noiser)
                 
         plt.figure(figsize=(15, 5))
         plt.imshow(grid.permute(1, 2, 0))

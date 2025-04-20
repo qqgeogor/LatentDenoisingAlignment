@@ -1,6 +1,6 @@
 python train_ctrl_inv.py     \
-    --data_path /mnt/d/datasets/cifar10     \
-    --output_dir /mnt/d/repo/output/r3gan-ctrl-inv     \
+    --dataset imagenet100     \
+    --data_path ../../autodl-tmp/imagenet100     \
+    --output_dir ../../autodl-tmp/output_ctrl_inv_imagenet100     \
     --save_freq 10 \
-    --latent_dim 384 \
-    --use_amp
+    --latent_dim 384 

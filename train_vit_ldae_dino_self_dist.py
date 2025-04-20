@@ -25,7 +25,7 @@ import torch.nn.functional as F
 import contextlib
 import utils_ibot as utils
 from vit import MaskedAutoencoderViT
-from utils_ibot import EMAPatchPCANoise as PatchPCANoise
+from utils_ibot import SVDPatchPCANoise as PatchPCANoise
 # Set matplotlib backend to avoid GUI dependencies
 os.environ['MPLBACKEND'] = 'Agg'
 import matplotlib
@@ -42,95 +42,6 @@ def fast_logdet_cholesky(x):
     """Calculate log determinant using Cholesky decomposition."""
     L = torch.linalg.cholesky(x)
     return 2 * torch.sum(torch.log(torch.diag(L)))
-
-
-class SVDPatchPCANoise(nn.Module):
-    """Module for applying PCA-based noise to image patches."""
-    
-    def __init__(self, patch_size=4, noise_scale=0.5, kernel='linear', gamma=1.0):
-        super().__init__()
-        self.patch_size = patch_size
-        self.noise_scale = noise_scale
-        self.ema_cov = None
-
-    def inverse_transform(self, x_components):
-        B, N, C = x_components.shape
-        x_components = x_components.reshape(B*N, C)
-        return (x_components @ self.ema_eig_vecs.T).reshape(B, N, C)
-
-    def forward(self, x, return_patches=False):
-        if not self.training:
-            return x
-
-        B, C, H, W = x.shape
-        p = self.patch_size
-        assert H % p == 0 and W % p == 0, "Image dimensions must be divisible by patch size"
-
-        # Extract patches (B, C, H, W) -> (B, num_patches, C*p*p)
-        x_patches = x.unfold(2, p, p).unfold(3, p, p)  # (B, C, H/p, W/p, p, p)
-        x_patches = x_patches.permute(0, 2, 3, 1, 4, 5)  # (B, H/p, W/p, C, p, p)
-        num_patches_h, num_patches_w = x_patches.size(1), x_patches.size(2)
-        x_patches = x_patches.reshape(B, num_patches_h * num_patches_w, C * p * p)
-
-        # Flatten all patches across batch and spatial dimensions
-        all_patches = x_patches.reshape(-1, C*p*p)  # (B*num_patches_total, C*p*p)
-
-        # Compute PCA components
-        with torch.no_grad():
-            mean = all_patches.mean(dim=0)
-            centered = all_patches - mean
-
-            n = centered.size(0)
-            u, s, v = torch.linalg.svd(centered, full_matrices=False)
-            eig_vals = (s**2)/(n-1 + 1e-6)
-            eig_vecs = v.T
-
-            idx = torch.argsort(eig_vals, descending=True)
-            eig_vals = eig_vals[idx]
-            eig_vecs = eig_vecs[:, idx]
-
-            valid_components = torch.sum(eig_vals > 1e-6)
-            self.valid_components = valid_components
-            eig_vals = eig_vals[:valid_components]
-            eig_vecs = eig_vecs[:, :valid_components]
-            
-            self.ema_eig_vals = eig_vals
-            self.ema_eig_vecs = eig_vecs
-        
-        noise_coeff = torch.randn(all_patches.size(0), self.valid_components).to(all_patches.device)
-        scaled_noise = noise_coeff * (self.ema_eig_vals.sqrt()).unsqueeze(0)
-        pca_noise = scaled_noise @ self.ema_eig_vecs.T
-
-        # Calculate noise energy per patch
-        noise_energy = torch.sum(pca_noise**2, dim=1)  # L2 norm squared per patch
-        
-        # Normalize to create weights - can use different normalization strategies
-        patch_weights = noise_energy / noise_energy.max()  # Simple min-max normalization
-        # Alternative: softmax-based weighting
-        # patch_weights = F.softmax(noise_energy / temperature, dim=0)
-        
-        # Reshape weights to match the original patch dimensions
-        patch_weights = patch_weights.reshape(B, num_patches_h * num_patches_w)
-        
-        # Store the weights for later use in the model
-        self.patch_weights = patch_weights
-
-        # Reshape noise and add to original patches
-        pca_noise = pca_noise.reshape_as(x_patches)
-        noisy_patches = x_patches + pca_noise
-
-        # Reconstruct noisy image from patches
-        noisy_patches = noisy_patches.reshape(B, num_patches_h, num_patches_w, C, p, p)
-        noisy_patches = noisy_patches.permute(0, 3, 1, 4, 2, 5)  # (B, C, H/p, p, W/p, p)
-        noisy_image = noisy_patches.reshape(B, C, H, W)
-
-        if return_patches:
-            components = all_patches @ self.ema_eig_vecs
-            components = components * torch.sqrt(self.ema_eig_vals + 1e-8).unsqueeze(0)
-            x_components = components.reshape_as(x_patches)
-            return noisy_image, x_components
-        else:
-            return noisy_image
 
 
 def R_nonorm(Z, eps=0.5, if_fast=True):
@@ -311,7 +222,7 @@ def get_args_parser():
     )
     parser.add_argument(
         '--noise_scale', 
-        default=(3**0.5), 
+        default=((1/3)**0.5), 
         type=float,
         help='Noise scale for PCA noise'
     )
@@ -738,20 +649,20 @@ def train_mae():
                 
                 with torch.no_grad():
                     target = teacher_model.forward_feature(target_noised_images)
-                    # target = teacher_model.forward_feature(imgs)
-                    target = teacher_model.proj_head(target)
-                target = F.normalize(target, dim=-1)
-                target = target.detach()
+                    target = F.layer_norm(target, (target.size(-1),))
+                    target = target.detach()
 
                 view = model.forward_feature(noised_images)
                 view = model.proj_head(view)
-                view = F.normalize(view, dim=-1)
 
-                view = view.reshape(-1, view.size(-1))
-                target = target.reshape(-1, target.size(-1))
-                patch_weights = torch.ones(view.shape[0],1).to(device)
-                
-                loss, loss_tcr, loss_cos, loss_sim = weighted_simsiam_loss(view, target, patch_weights)
+                z = view[:,0]
+                z = F.normalize(z,dim=-1)
+                z_patch = view[:,1:]
+                z_t_patch = target[:,1:]
+                loss_smooth = F.smooth_l1_loss(z_patch,z_t_patch,reduction='none').mean(-1).mean()
+                loss_tcr = -R_nonorm(z)*1e-2
+                loss = loss_smooth + loss_tcr
+                loss_cos = F.cosine_similarity(z_patch,z_t_patch,dim=-1).mean()
                 
             # Backward pass with gradient scaling if using AMP
             if args.use_amp:
@@ -778,10 +689,9 @@ def train_mae():
                 print(
                     f'Epoch: {epoch + 1}, Batch: {i + 1}, '
                     f'Loss: {avg_loss:.3f}, '
+                    f'Loss_smooth: {loss_smooth:.3f}, '
                     f'Loss_tcr: {loss_tcr:.3f}, '
                     f'Loss_cos: {loss_cos:.3f}, '
-                    f'Loss_sim: {loss_sim:.3f}, '
-                    f'Patch_weights: {patch_weights.mean(),patch_weights.max(),patch_weights.min()}, '
                     f'Momentum: {momentum:.5f}, '
                     f'Weight_decay: {current_weight_decay:.6f}, '
                     f'LR: {current_lr:.6f}'
