@@ -1,0 +1,12 @@
+python train_mae_cifar10_jepa_cnn.py \
+    --use_amp \
+    --output_dir ../../autodl-tmp/output_jepa_cnn/  \
+    --img_size 32 \
+    --patch_size 4 \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --dataset 'cifar10' \
+    --data_path '../../autodl-fs/cifar10' \
+    --mask_ratio 0.75 \
+    --num_views 1 \
+    --save_freq 20 

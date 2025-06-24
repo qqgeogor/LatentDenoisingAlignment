@@ -722,3 +722,9 @@ python finetune_cifar_classifier_vit_noprop.py     \
     --T 10 \
     --decoder_depth 2 \
     --use_amp
+
+
+python finetune_cifar_classifier_vit_jepa_cnn.py \
+    --img_size 128     \
+    --patch_size 16      \
+    --use_amp
