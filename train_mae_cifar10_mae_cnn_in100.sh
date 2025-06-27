@@ -1,9 +1,11 @@
-python train_mae_cifar10_jepa_cnn.py \
-    --output_dir ../../autodl-tmp/output_jepa_cnn_in100/  \
+python train_mae_cifar10_mae_cnn.py \
+    --use_amp \
+    --output_dir ../../autodl-tmp/output_mae_cnn_in100/  \
     --img_size 128 \
     --patch_size 16 \
     --embed_dim 192 \
     --decoder_embed_dim 192 \
+    --encoder_type resnet \
     --dataset 'imagenet100' \
     --data_path '../../autodl-fs/imagenet100' \
     --mask_ratio 0.75 \

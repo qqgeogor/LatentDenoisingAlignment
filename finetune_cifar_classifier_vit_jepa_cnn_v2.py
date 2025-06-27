@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 import os
 from pathlib import Path
 from tqdm import tqdm
-from train_mae_cifar10_jepa_cnn import MaskedAutoencoderViT
+from train_mae_cifar10_jepa_cnn_v2 import MaskedAutoencoderViT
 from torch.cuda.amp import autocast, GradScaler
 import mlflow
 
@@ -136,7 +136,7 @@ def finetune(args):
                      embed_dim=args.embed_dim, depth=args.depth, num_heads=args.num_heads,
                      decoder_embed_dim=args.decoder_embed_dim, decoder_depth=args.decoder_depth, decoder_num_heads=args.decoder_num_heads,
                      mlp_ratio=args.mlp_ratio, norm_layer=nn.LayerNorm, norm_pix_loss=False, 
-                     use_checkpoint=False,decoder_type = args.decoder_type,encoder_type = args.encoder_type
+                     use_checkpoint=False,decoder_type = args.decoder_type
                      ).to(device)
         if args.pretrained_path:
             checkpoint = torch.load(args.pretrained_path)

@@ -30,7 +30,7 @@ import matplotlib
 matplotlib.use('Agg')  # Set this before importing pyplot
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-from resmodel import Encoder,Decoder,SparseEncoder
+from resmodel import Encoder,Decoder,SparseEncoder,SparseEncoderV2
 from contextlib import nullcontext
 def R(Z,eps=0.5):
     Z = F.normalize(Z,dim=-1)
@@ -80,7 +80,7 @@ class MaskedAutoencoderViT(nn.Module):
     def __init__(self, img_size=32, patch_size=4, in_chans=3,
                  embed_dim=192, depth=12, num_heads=3,
                  decoder_embed_dim=96, decoder_depth=4, decoder_num_heads=3,
-                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, use_checkpoint=False,encoder_type='cnn',decoder_type='cnn'):
+                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, use_checkpoint=False,decoder_type='cnn'):
         super().__init__()
         self.use_checkpoint = use_checkpoint
         self.embed_dim = embed_dim
@@ -93,9 +93,8 @@ class MaskedAutoencoderViT(nn.Module):
         self.decoder_embed_dim = decoder_embed_dim
         self.decoder_depth = decoder_depth
         self.decoder_num_heads = decoder_num_heads
-        self.encoder_type = encoder_type
         self.decoder_type = decoder_type
-        if encoder_type == "sparse_cnn":
+        if decoder_type == "sparse_cnn":
             self.use_sparse = True
         else:
             self.use_sparse = False
@@ -144,8 +143,7 @@ class MaskedAutoencoderViT(nn.Module):
         )
 
 
-        # self.encoder = Encoder(img_channels=3,patch_size=patch_size,hidden_dim=192)
-        self.encoder = SparseEncoder(img_channels=3,patch_size=patch_size,hidden_dim=embed_dim,sparse=self.use_sparse)
+        self.encoder = SparseEncoderV2(img_channels=3,patch_size=patch_size,hidden_dim=embed_dim)
         self.decoder = Decoder(latent_dim=decoder_embed_dim,patch_size=patch_size,hidden_dim=decoder_embed_dim)
 
         self.norm_pix_loss = norm_pix_loss
@@ -586,12 +584,9 @@ def get_args_parser():
                         help='Number of decoder attention heads')
     parser.add_argument('--mlp_ratio', default=4., type=float,
                         help='MLP hidden dim ratio')
-    parser.add_argument('--encoder_type', default='cnn', type=str,
-                        help='Decoder type (cnn or sparse_cnn)')
     parser.add_argument('--decoder_type', default='cnn', type=str,
-                        help='Decoder type (vit or cnn)')
-    
-    
+                        help='Decoder type (vit or cnn or sparse_cnn)')
+                        
     # Training parameters
     parser.add_argument('--epochs', default=1600, type=int,
                         help='Number of epochs to train')
@@ -715,7 +710,6 @@ def train_mae():
         decoder_num_heads=args.decoder_num_heads,
         mlp_ratio=args.mlp_ratio,
         use_checkpoint=args.use_checkpoint,
-        encoder_type=args.encoder_type,
         decoder_type=args.decoder_type
     ).to(device)
 
@@ -730,7 +724,6 @@ def train_mae():
         decoder_num_heads=args.decoder_num_heads,
         mlp_ratio=args.mlp_ratio,
         use_checkpoint=args.use_checkpoint,
-        encoder_type=args.encoder_type,
         decoder_type=args.decoder_type
     ).to(device)
 

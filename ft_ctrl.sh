@@ -725,6 +725,140 @@ python finetune_cifar_classifier_vit_noprop.py     \
 
 
 python finetune_cifar_classifier_vit_jepa_cnn.py \
+    --img_size 32     \
+    --patch_size 4      \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --use_amp
+
+
+
+python finetune_cifar_classifier_vit_jepa_cnn.py \
+    --pretrained_path ../../autodl-tmp/output_jepa_cnn/checkpoint_epoch_20.pth     \
+    --img_size 32     \
+    --patch_size 4      \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --use_amp
+
+
+
+python finetune_cifar_classifier_vit_jepa_cnn.py \
+    --pretrained_path ../../autodl-tmp/output_mae_cnn/checkpoint_epoch_20.pth     \
+    --img_size 32     \
+    --patch_size 4      \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --use_amp
+
+
+
+python finetune_cifar_classifier_vit_mae_cnn.py \
+    --pretrained_path ../../autodl-tmp/output_mae_cnn/checkpoint_epoch_20.pth     \
+    --img_size 32     \
+    --patch_size 4      \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --encoder_type resnet \
+    --use_amp
+
+
+python finetune_cifar_classifier_vit_mae_cnn.py \
+    --pretrained_path ../../autodl-tmp/output_mae_cnn_repvgg/checkpoint_epoch_40.pth     \
+    --img_size 32     \
+    --patch_size 4      \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --encoder_type repvgg \
+    --use_amp
+
+
+
+python finetune_cifar_classifier_vit_jepa_cnn.py \
+    --pretrained_path ../../autodl-tmp/output_jepa_cnn_sparse/checkpoint_epoch_20.pth     \
+    --img_size 32     \
+    --patch_size 4      \
+    --embed_dim 192 \
+    --encoder_type sparse_cnn \
+    --decoder_embed_dim 192 \
+    --use_amp
+
+
+python finetune_cifar_classifier_vit_jepa_cnn.py \
+    --pretrained_path ../../autodl-tmp/output_jepa_cnn_vit_dec/checkpoint_epoch_180.pth     \
+    --img_size 32     \
+    --patch_size 4      \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --use_amp
+
+
+
+python finetune_cifar_classifier_vit_mae_cnn.py \
     --img_size 128     \
     --patch_size 16      \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --encoder_type resnet \
+    --use_amp
+
+
+
+
+python finetune_cifar_classifier_vit_mae_cnn.py \
+    --pretrained_path ../../autodl-tmp/output_mae_cnn_in100/checkpoint_epoch_20.pth     \
+    --img_size 128     \
+    --patch_size 16      \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --encoder_type resnet \
+    --use_amp
+
+
+python finetune_cifar_classifier_vit_jepa_cnn.py \
+    --pretrained_path ../../autodl-tmp/output_jepa_cnn_sparse_in100/checkpoint_epoch_180.pth     \
+    --img_size 32     \
+    --patch_size 4      \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --encoder_type sparse_cnn \
+    --use_amp
+
+
+
+python finetune_cifar_classifier_vit_mae_cnn.py \
+    --pretrained_path ../../autodl-tmp/output_mae_cnn/checkpoint_epoch_180.pth     \
+    --img_size 32     \
+    --patch_size 4      \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --encoder_type resnet \
+    --use_amp
+
+
+
+
+python finetune_cifar_classifier_vit_mae_cnn.py \
+    --pretrained_path ../../autodl-tmp/output_mae_cnn_in100/checkpoint_epoch_160.pth     \
+    --img_size 128     \
+    --patch_size 16      \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --encoder_type resnet \
+    --use_amp
+
+
+python finetune_cifar_classifier_vit_jepa_cnn_v2.py \
+    --img_size 32     \
+    --patch_size 4      \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --use_amp
+    
+python finetune_cifar_classifier_vit_jepa_cnn_v2.py \
+    --pretrained_path ../../autodl-tmp/output_jepa_cnn_sparse_v2/checkpoint_epoch_20.pth     \
+    --img_size 32     \
+    --patch_size 4      \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
     --use_amp

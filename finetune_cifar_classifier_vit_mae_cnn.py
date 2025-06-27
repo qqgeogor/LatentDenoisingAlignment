@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 import os
 from pathlib import Path
 from tqdm import tqdm
-from train_mae_cifar10_jepa_cnn import MaskedAutoencoderViT
+from train_mae_cifar10_mae_cnn import MaskedAutoencoderViT
 from torch.cuda.amp import autocast, GradScaler
 import mlflow
 
@@ -86,6 +86,7 @@ def finetune(args):
         
         # Initialize GradScaler for AMP
         scaler = GradScaler(enabled=args.use_amp)
+
         if args.img_size == 32:
             # Data preprocessing for training
             train_transform = transforms.Compose([
@@ -119,7 +120,7 @@ def finetune(args):
                 transforms.ToTensor(),
                 transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))  # ImageNet normalization
             ])
-
+        
         # Load CIFAR-10
         trainset = torchvision.datasets.CIFAR10(root=args.data_path, train=True,
                                               download=True, transform=train_transform)
@@ -135,9 +136,7 @@ def finetune(args):
         backbone = MaskedAutoencoderViT(img_size=args.img_size, patch_size=args.patch_size, in_chans=3,
                      embed_dim=args.embed_dim, depth=args.depth, num_heads=args.num_heads,
                      decoder_embed_dim=args.decoder_embed_dim, decoder_depth=args.decoder_depth, decoder_num_heads=args.decoder_num_heads,
-                     mlp_ratio=args.mlp_ratio, norm_layer=nn.LayerNorm, norm_pix_loss=False, 
-                     use_checkpoint=False,decoder_type = args.decoder_type,encoder_type = args.encoder_type
-                     ).to(device)
+                     mlp_ratio=args.mlp_ratio, norm_layer=nn.LayerNorm, norm_pix_loss=False, use_checkpoint=False,encoder_type=args.encoder_type).to(device)
         if args.pretrained_path:
             checkpoint = torch.load(args.pretrained_path)
             backbone.load_state_dict(checkpoint['model_state_dict'],strict=False)
@@ -236,7 +235,6 @@ def get_args_parser():
     parser.add_argument('--epochs', default=100, type=int)
     parser.add_argument('--batch_size', default=128, type=int)
     parser.add_argument('--lr', default=1e-4, type=float)
-    parser.add_argument('--encoder_type', default='student', type=str)
     parser.add_argument('--freeze_backbone', action='store_true',default=False,
                        help='Freeze backbone during training')
     # System parameters
@@ -259,10 +257,8 @@ def get_args_parser():
     parser.add_argument('--decoder_depth', default=4, type=int)
     parser.add_argument('--decoder_num_heads', default=3, type=int)
     parser.add_argument('--mlp_ratio', default=4., type=float)
-    #--decoder_type  
-    parser.add_argument('--decoder_type', default='cnn', type=str)
-    
-    
+    parser.add_argument('--encoder_type', default='resnet', type=str)
+
     # Add AMP argument
     parser.add_argument('--use_amp', action='store_true',
                        help='Use Automatic Mixed Precision training')
