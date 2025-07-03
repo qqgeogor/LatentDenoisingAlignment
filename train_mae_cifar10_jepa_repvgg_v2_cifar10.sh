@@ -1,0 +1,13 @@
+python train_mae_cifar10_jepa_repvgg_v2.py \
+    --output_dir ../../autodl-tmp/output_jepa_repvgg_v2_cifar/  \
+    --img_size 32 \
+    --patch_size 8 \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --dataset 'cifar10' \
+    --data_path '../../autodl-fs/cifar10' \
+    --mask_ratio 0.75 \
+    --num_views 1 \
+    --encoder_type sparse_repvgg \
+    --decoder_type vit \
+    --save_freq 20 

@@ -1,0 +1,15 @@
+python train_ecctrl_vit.py     \
+    --dataset imagenet100 \
+    --data_path ../../autodl-fs/imagenet100     \
+    --output_dir ../../autodl-tmp/output_ecctrl_vit_in100     \
+    --save_freq 10     \
+    --batch_size 128    \
+    --latent_dim 192 \
+    --embed_dim 192 \
+    --depth 12 \
+    --num_heads 3 \
+    --decoder_depth 4 \
+    --decoder_embed_dim 96 \
+    --tcr_weight 0.01 \
+    --img_size 128 \
+    --patch_size 16 

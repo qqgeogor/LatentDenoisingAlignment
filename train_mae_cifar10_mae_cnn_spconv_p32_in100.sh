@@ -1,0 +1,13 @@
+python train_mae_cifar10_mae_cnn.py \
+    --use_amp \
+    --output_dir ../../autodl-tmp/output_mae_cnn_spconv_p32_in100/  \
+    --img_size 128 \
+    --patch_size 32 \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --dataset 'imagenet100' \
+    --data_path '../../autodl-fs/imagenet100' \
+    --encoder_type spconv \
+    --mask_ratio 0.75 \
+    --num_views 1 \
+    --save_freq 20 

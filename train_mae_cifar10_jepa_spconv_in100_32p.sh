@@ -1,0 +1,13 @@
+python train_mae_cifar10_jepa_spconv.py \
+    --output_dir ../../autodl-tmp/output_jepa_spconv_in100_32p/  \
+    --img_size 128 \
+    --patch_size 32 \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --dataset 'imagenet100' \
+    --data_path '../../autodl-fs/imagenet100' \
+    --mask_ratio 0.75 \
+    --num_views 1 \
+    --encoder_type spconv \
+    --decoder_type vit \
+    --save_freq 20 

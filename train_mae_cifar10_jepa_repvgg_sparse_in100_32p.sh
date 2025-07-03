@@ -1,0 +1,13 @@
+python train_mae_cifar10_jepa_repvgg.py \
+    --output_dir ../../autodl-tmp/output_jepa_repvgg_sparse_in100_32p/  \
+    --img_size 128 \
+    --patch_size 32 \
+    --embed_dim 192 \
+    --decoder_embed_dim 192 \
+    --dataset 'imagenet100' \
+    --data_path '../../autodl-fs/imagenet100' \
+    --mask_ratio 0.75 \
+    --num_views 1 \
+    --encoder_type sparse_repvgg \
+    --decoder_type vit \
+    --save_freq 20 
