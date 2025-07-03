@@ -40,16 +40,30 @@ class RepVGGBlock(nn.Module):
                 nn.BatchNorm2d(num_features=out_channels),
             )
 
-    def forward(self, inputs):
+    def forward(self, inputs,mask=None):
         if hasattr(self, 'rbr_reparam'):
-            return F.relu(self.rbr_reparam(inputs))
+            return F.relu(self.rbr_reparam(inputs)),mask
 
         if self.rbr_identity is None:
             id_out = 0
         else:
             id_out = self.rbr_identity(inputs)
+        
+        x = F.relu(self.rbr_dense(inputs) + self.rbr_1x1(inputs) + id_out)
 
-        return F.relu(self.rbr_dense(inputs) + self.rbr_1x1(inputs) + id_out)
+        if mask is not None:
+            active_mask = 1 - mask.float()
+            b,l = active_mask.shape
+            f = int(l**.5)
+            active_mask = active_mask.reshape(b,f,f)
+            
+            B,C,H,W = x.shape
+            scale_h,scale_w = H//f,W//f
+            current_active_mask = active_mask.repeat_interleave(scale_h,dim=1).repeat_interleave(scale_w,dim=2)
+            x = x*current_active_mask.unsqueeze(1)
+
+
+        return  x,mask
 
     def get_equivalent_kernel_bias(self):
         kernel3x3, bias3x3 = self._fuse_bn_tensor(self.rbr_dense)
@@ -127,11 +141,23 @@ class RepVGGBlockDown(nn.Module):
                 nn.BatchNorm2d(num_features=out_channels),
             )
 
-    def forward(self, inputs):
+    def forward(self, inputs,mask=None):
         if hasattr(self, 'rbr_reparam'):
-            return F.relu(self.rbr_reparam(inputs))
+            return F.relu(self.rbr_reparam(inputs)),mask
 
-        return F.relu(self.rbr_dense(inputs) + self.rbr_1x1(inputs))
+        x = F.relu(self.rbr_dense(inputs) + self.rbr_1x1(inputs))
+
+        if mask is not None:
+            active_mask = 1 - mask.float()
+            b,l = active_mask.shape
+            f = int(l**.5)
+            active_mask = active_mask.reshape(b,f,f)
+            
+            B,C,H,W = x.shape
+            scale_h,scale_w = H//f,W//f
+            current_active_mask = active_mask.repeat_interleave(scale_h,dim=1).repeat_interleave(scale_w,dim=2)
+            x = x*current_active_mask.unsqueeze(1)
+        return x,mask
 
     def get_equivalent_kernel_bias(self):
         kernel3x3, bias3x3 = self._fuse_bn_tensor(self.rbr_dense)
@@ -176,6 +202,25 @@ class RepVGGBlockDown(nn.Module):
         kernel, bias = self.get_equivalent_kernel_bias()
         return kernel.detach().cpu().numpy(), bias.detach().cpu().numpy()
 
+
+
+
+# Custom Sequential class that can handle (x, mask) tuples
+class MaskedSequential(nn.Module):
+    def __init__(self, *modules):
+        super().__init__()
+        self.modules_list = nn.ModuleList(modules)
+    
+    def forward(self, x, mask=None):
+        for module in self.modules_list:
+            if hasattr(module, 'forward') and 'mask' in module.forward.__code__.co_varnames:
+                x, mask = module(x, mask)
+            else:
+                x = module(x)
+        return x, mask
+
+
+
 # Now let's update the Encoder and Decoder with RepVGG implementations:
 
 class Encoder(nn.Module):
@@ -191,9 +236,7 @@ class Encoder(nn.Module):
         
         n_layers = int(np.log2(patch_size))
         
-        self.stem = nn.Sequential(
-            nn.Conv2d(img_channels, hidden_dim, kernel_size=stem_kernel, stride=stem_stride, padding=stem_padding),
-        )
+
 
         all_hidden_dims = [hidden_dim] 
         for i in range(n_layers-1):
@@ -211,7 +254,7 @@ class Encoder(nn.Module):
         for i in range(n_layers):
             current_hidden_dim = all_hidden_dims[i]
             print('current_hidden_dim', current_hidden_dim)
-            layer = nn.Sequential(
+            layer = MaskedSequential(
                 RepVGGBlockDown(current_hidden_dim//2, current_hidden_dim),
                 RepVGGBlock(current_hidden_dim, current_hidden_dim),
                 RepVGGBlock(current_hidden_dim, current_hidden_dim),
@@ -395,9 +438,6 @@ class Decoder(nn.Module):
         return x 
 
 
-
-
-
 class SparseEncoder(Encoder):
     def __init__(self, img_channels=3,patch_size=16,hidden_dim=192,sparse=False):
         super().__init__(img_channels,patch_size,hidden_dim)
@@ -406,35 +446,17 @@ class SparseEncoder(Encoder):
     def forward_backbone(self, x):
         x = self.stem(x)
         for layer in self.layers:
-            x = layer(x)
+            x,_ = layer(x)
         return x
 
     # x: b,c,h,w
     def forward_backbone_sparse(self, x,mask):
 
-        active_mask = 1 - mask.float()
-        b,l = active_mask.shape
-        f = int(l**.5)
-        active_mask = active_mask.reshape(b,f,f)
-        
-        # input shape
-        B,C,H,W = x.shape
-        
-
-        scale_h,scale_w = H//f,W//f
-        current_active_mask = active_mask.repeat_interleave(scale_h,dim=1).repeat_interleave(scale_w,dim=2)
-        
-
         x = self.stem(x)
-        x = x*current_active_mask.unsqueeze(1)
-
 
         for layer in self.layers:
-            x = layer(x)
-            B,C,H,W = x.shape
-            scale_h,scale_w = H//f,W//f
-            current_active_mask = active_mask.repeat_interleave(scale_h,dim=1).repeat_interleave(scale_w,dim=2)
-            x = x*current_active_mask.unsqueeze(1)
+            x,_ = layer(x,mask)
+
 
         return x
 

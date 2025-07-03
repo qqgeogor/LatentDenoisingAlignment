@@ -89,7 +89,7 @@ def visualize_features(features, labels, output_dir, method='both', n_components
                    'dog', 'frog', 'horse', 'ship', 'truck']
     
     # Create a colormap
-    colors = plt.cm.tab10(np.arange(10))
+    colors = plt.cm.get_cmap('tab10')(np.arange(10))
     
     # PCA visualization
     if method in ['pca', 'both']:
@@ -119,7 +119,7 @@ def visualize_features(features, labels, output_dir, method='both', n_components
     # t-SNE visualization
     if method in ['tsne', 'both']:
         print("Performing t-SNE...")
-        tsne = TSNE(n_components=n_components, perplexity=perplexity, n_iter=1000, verbose=1)
+        tsne = TSNE(n_components=n_components, perplexity=perplexity, max_iter=1000, verbose=1)
         reduced_features = tsne.fit_transform(features)
         
         plt.figure(figsize=(10, 8))
@@ -214,7 +214,7 @@ def evaluate_model(args):
     print(f"Results saved to {args.output_dir}")
     
     # Return best k and accuracy
-    best_k = max(results, key=results.get)
+    best_k = max(results.keys(), key=lambda k: results[k])
     print(f"Best result: k={best_k}, Accuracy: {results[best_k]:.2f}%")
     
     return results
@@ -245,7 +245,7 @@ def get_args_parser():
                        help='Use Automatic Mixed Precision')
     
     # Visualization parameters
-    parser.add_argument('--visualize_features', action='store_true', default=False,
+    parser.add_argument('--visualize_features', action='store_true', default=True,
                        help='Visualize features using PCA and t-SNE')
     parser.add_argument('--vis_method', type=str, default='both', choices=['pca', 'tsne', 'both'],
                        help='Visualization method to use')

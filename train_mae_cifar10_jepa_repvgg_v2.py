@@ -30,10 +30,8 @@ import matplotlib
 matplotlib.use('Agg')  # Set this before importing pyplot
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-from resmodel import Encoder,Decoder
-from repvggmodel import Encoder as EncoderRepVGG,Decoder as DecoderRepVGG
-from sparse_resnet import SPConvEncoder,DenseEncoderResNet,transfer_sparse_to_dense_params
-
+from repvggmodel_sparse import Encoder,Decoder,SparseEncoder
+from contextlib import nullcontext
 def R(Z,eps=0.5):
     Z = F.normalize(Z,dim=-1)
     b = Z.shape[-2]
@@ -82,7 +80,7 @@ class MaskedAutoencoderViT(nn.Module):
     def __init__(self, img_size=32, patch_size=4, in_chans=3,
                  embed_dim=192, depth=12, num_heads=3,
                  decoder_embed_dim=96, decoder_depth=4, decoder_num_heads=3,
-                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, use_checkpoint=False,encoder_type="resnet"):
+                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, use_checkpoint=False,encoder_type='cnn',decoder_type='cnn'):
         super().__init__()
         self.use_checkpoint = use_checkpoint
         self.embed_dim = embed_dim
@@ -96,6 +94,11 @@ class MaskedAutoencoderViT(nn.Module):
         self.decoder_depth = decoder_depth
         self.decoder_num_heads = decoder_num_heads
         self.encoder_type = encoder_type
+        self.decoder_type = decoder_type
+        if encoder_type == "sparse_repvgg":
+            self.use_sparse = True
+        else:
+            self.use_sparse = False
 
 
         self.proj_head = nn.Sequential(
@@ -137,19 +140,14 @@ class MaskedAutoencoderViT(nn.Module):
         self.decoder_projector = nn.Sequential(
             nn.Linear(decoder_embed_dim, decoder_embed_dim*4),
             nn.GELU(),
-            nn.Linear(decoder_embed_dim*4, patch_size**2 * in_chans),
+            nn.Linear(decoder_embed_dim*4, decoder_embed_dim),
         )
 
-        if self.encoder_type== "resnet":
-            self.encoder = Encoder(img_channels=3,patch_size=patch_size,hidden_dim=embed_dim)
-            self.decoder = Decoder(latent_dim=embed_dim,patch_size=patch_size,hidden_dim=embed_dim)
-        elif self.encoder_type == "repvgg":
-            self.encoder = EncoderRepVGG(img_channels=3,patch_size=patch_size,hidden_dim=embed_dim)
-            self.decoder = DecoderRepVGG(latent_dim=embed_dim,patch_size=patch_size,hidden_dim=embed_dim)
-        elif self.encoder_type == "spconv":
-            self.encoder = SPConvEncoder(img_channels=3,patch_size=patch_size,hidden_dim=embed_dim)
-            self.decoder = Decoder(latent_dim=embed_dim,patch_size=patch_size,hidden_dim=embed_dim)
-    
+
+        # self.encoder = Encoder(img_channels=3,patch_size=patch_size,hidden_dim=192)
+        self.encoder = SparseEncoder(img_channels=3,patch_size=patch_size,hidden_dim=embed_dim,sparse=self.use_sparse)
+        self.decoder = Decoder(latent_dim=decoder_embed_dim,patch_size=patch_size,hidden_dim=decoder_embed_dim)
+
         self.norm_pix_loss = norm_pix_loss
         self.patch_size = patch_size
         self.initialize_weights()
@@ -159,17 +157,6 @@ class MaskedAutoencoderViT(nn.Module):
             rho=7.0,
             num_steps=40
         )
-
-    def transfer_sparse_to_dense_params(self):
-        self.dense_model = DenseEncoderResNet(
-            img_channels=3,
-            patch_size=self.patch_size,
-            hidden_dim=self.embed_dim,
-            embed_dim=self.embed_dim
-        ).cuda()
-        
-        transfer_sparse_to_dense_params(self.encoder.sparse_resnet, self.dense_model)
-
 
     def initialize_weights(self):
         # Initialize position embeddings
@@ -240,6 +227,28 @@ class MaskedAutoencoderViT(nn.Module):
 
         return x_masked, mask, ids_restore
 
+    def forward_decoder_vit(self, x, ids_restore):
+        x = self.decoder_embed(x)
+
+        mask_tokens = self.mask_token.repeat(x.shape[0], ids_restore.shape[1] + 1 - x.shape[1], 1)
+        x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)
+        x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))
+
+        x = torch.cat([x[:, :1, :], x_], dim=1)
+
+        x = x + self.decoder_pos_embed
+
+        for blk in self.decoder_blocks:
+            if self.use_checkpoint:
+                x = torch.utils.checkpoint.checkpoint(blk, x)  # Enable gradient checkpointing
+            else:
+                x = blk(x)
+        x = x[:,1:,:]
+        return x
+
+    def forward_decoder_cnn(self, x, ids_restore):
+        x = self.decoder(x,ids_restore)
+        return x
 
     def forward_feature(self, x):
         x = self.encoder.forward_feature(x)
@@ -253,7 +262,10 @@ class MaskedAutoencoderViT(nn.Module):
         return self.sampler.sample(x)
 
     def forward_decoder(self, x,ids_restore):
-        x = self.decoder(x,ids_restore)
+        if self.decoder_type == "cnn":
+            x = self.forward_decoder_cnn(x,ids_restore)
+        else:
+            x = self.forward_decoder_vit(x,ids_restore)
 
         x = self.decoder_norm(x)
         x = self.decoder_projector(x)
@@ -428,8 +440,7 @@ def visualize_reconstruction(model, images, mask_ratio=0.75, save_path='reconstr
     os.makedirs(save_path, exist_ok=True)
     if pca_noiser is None:
         pca_noiser = PatchPCANoise(patch_size=model.patch_size, noise_scale=1.,kernel='linear',gamma=1.0)
-    # noised_images,x_components = pca_noiser(images,return_patches=True)
-    noised_images = images.clone()
+    noised_images,x_components = pca_noiser(images,return_patches=True)
     model.eval()
     with torch.no_grad():
         # Get reconstruction and mask
@@ -438,8 +449,7 @@ def visualize_reconstruction(model, images, mask_ratio=0.75, save_path='reconstr
         noised_x = torch.randn_like(noised_images)*model.sampler.sigma_max
         sigmas = get_sigmas_karras(1, model.sampler.sigma_min, model.sampler.sigma_max, rho=model.sampler.rho, device="cpu")
         
-        pred1 = model.forward_decoder(latent,ids_restore)
-        pred1 = model.unpatchify(pred1)
+        pred1 = model.denoise(noised_x,latent,mask,ids_restore,sigmas[0])
         pred3 = pred2 = pred1
         # pred1 = (1-mask.unsqueeze(-1)) * model.patchify(noised_images) + mask.unsqueeze(-1) * model.patchify(pred1)
         # pred1 = model.patchify(pred1)
@@ -576,8 +586,11 @@ def get_args_parser():
                         help='Number of decoder attention heads')
     parser.add_argument('--mlp_ratio', default=4., type=float,
                         help='MLP hidden dim ratio')
-    parser.add_argument('--encoder_type', default='resnet', type=str,
-                        help='Encoder type (resnet or repvgg or spconv)')
+    parser.add_argument('--encoder_type', default='cnn', type=str,
+                        help='Decoder type (cnn or sparse_repvgg)')
+    parser.add_argument('--decoder_type', default='cnn', type=str,
+                        help='Decoder type (vit or cnn)')
+    
     
     # Training parameters
     parser.add_argument('--epochs', default=1600, type=int,
@@ -600,9 +613,9 @@ def get_args_parser():
                         help='Device to use for training')
     parser.add_argument('--seed', default=0, type=int,
                         help='Random seed')
-    parser.add_argument('--use_amp', action='store_true',default=True,
+    parser.add_argument('--use_amp', action='store_true',
                         help='Use mixed precision training')
-    parser.add_argument('--use_checkpoint', action='store_true',default=False,
+    parser.add_argument('--use_checkpoint', action='store_true',
                         help='Use gradient checkpointing to save memory')
     
     # Logging and saving
@@ -702,7 +715,8 @@ def train_mae():
         decoder_num_heads=args.decoder_num_heads,
         mlp_ratio=args.mlp_ratio,
         use_checkpoint=args.use_checkpoint,
-        encoder_type=args.encoder_type
+        encoder_type=args.encoder_type,
+        decoder_type=args.decoder_type
     ).to(device)
 
     teacher_model = MaskedAutoencoderViT(
@@ -716,7 +730,8 @@ def train_mae():
         decoder_num_heads=args.decoder_num_heads,
         mlp_ratio=args.mlp_ratio,
         use_checkpoint=args.use_checkpoint,
-        encoder_type=args.encoder_type
+        encoder_type=args.encoder_type,
+        decoder_type=args.decoder_type
     ).to(device)
 
     # Create optimizer with explicit betas
@@ -766,15 +781,15 @@ def train_mae():
     best_loss = float('inf')
 
     imgs = next(iter(trainloader))[0]
-    grid = visualize_reconstruction(model, imgs[:8].to(device),pca_noiser=pca_noiser)
+    # grid = visualize_reconstruction(model, imgs[:8].to(device),pca_noiser=pca_noiser)
 
-    plt.figure(figsize=(15, 5))
-    plt.imshow(grid.permute(1, 2, 0))
-    plt.axis('off')
-    plt.savefig(os.path.join(args.output_dir, f'reconstruction_epoch_{args.start_epoch}.png'))
-    plt.close()
-    epoch_path = os.path.join(args.output_dir, f'model_epoch_{args.start_epoch}.pth')
-    torch.save(model.state_dict(), epoch_path)    
+    # plt.figure(figsize=(15, 5))
+    # plt.imshow(grid.permute(1, 2, 0))
+    # plt.axis('off')
+    # plt.savefig(os.path.join(args.output_dir, f'reconstruction_epoch_{args.start_epoch}.png'))
+    # plt.close()
+    # epoch_path = os.path.join(args.output_dir, f'model_epoch_{args.start_epoch}.pth')
+    # torch.save(model.state_dict(), epoch_path)    
     
     for epoch in range(args.start_epoch, args.epochs):
         model.train()
@@ -790,16 +805,14 @@ def train_mae():
             optimizer.zero_grad()
             
         
-            with autocast():
-                # with torch.no_grad():
-                #     # h3,mask3,ids_restore3 = teacher_model.forward_encoder(imgs, mask_ratio=args.mask_ratio)
-                #     # z3 = teacher_model.forward_decoder(h3,ids_restore3)
-                #     z3 = teacher_model.forward_feature(imgs)
-                #     # z3 = F.normalize(z3,dim=-1)
-                #     z3 = F.layer_norm(z3, (z3.size(-1),))
-                #     z3 = z3.detach()
-
-                z3 = model.patchify(imgs)
+            with autocast() if args.use_amp else nullcontext():
+                with torch.no_grad():
+                    # h3,mask3,ids_restore3 = teacher_model.forward_encoder(imgs, mask_ratio=args.mask_ratio)
+                    # z3 = teacher_model.forward_decoder(h3,ids_restore3)
+                    z3 = teacher_model.forward_feature(imgs)
+                    # z3 = F.normalize(z3,dim=-1)
+                    z3 = F.layer_norm(z3, (z3.size(-1),))
+                    z3 = z3.detach()
 
                 loss = 0
                 for _ in range(args.num_views):
@@ -815,18 +828,22 @@ def train_mae():
                     # mask1 = mask1.reshape(-1,1)
                     # loss = loss*mask1
                     # loss/=
-                    loss = (z1 - z3) ** 2
-                    # loss = F.smooth_l1_loss(z1, z3,reduction='none')
+                    # loss = (pred - target) ** 2
+                    loss = F.smooth_l1_loss(z1, z3,reduction='none')
                     loss = loss.mean(dim=-1)
                     loss = (loss * mask1).sum() / mask1.sum()
 
                     loss += loss.mean()
                     # loss+= F.mse_loss(z1,z3,reduction='none').mean(-1).mean()
                 loss = loss/args.num_views
-
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            
+            if args.use_amp:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
         
             
             total_loss += loss.item()
@@ -848,14 +865,7 @@ def train_mae():
                       f'LR: {current_lr:.6f}')
         
         epoch_loss = total_loss / num_batches
-        grid = visualize_reconstruction(model, imgs[:8].to(device),pca_noiser=pca_noiser)
 
-        plt.figure(figsize=(15, 5))
-        plt.imshow(grid.permute(1, 2, 0))
-        plt.axis('off')
-        plt.savefig(os.path.join(args.output_dir, f'reconstruction_epoch_{epoch}.png'))
-        plt.close()
-        
         # Save checkpoint and visualize
         if epoch % args.save_freq == 0 or epoch == args.epochs - 1:
             checkpoint_path = os.path.join(args.output_dir, f'checkpoint_epoch_{epoch}.pth')
