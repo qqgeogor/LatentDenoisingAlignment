@@ -14,6 +14,28 @@ from tqdm import tqdm
 import argparse
 import torch.nn.functional as F
 from contextlib import nullcontext
+# Add CLIP import
+# Install CLIP: pip install git+https://github.com/openai/CLIP.git
+# OR Install OpenCLIP: pip install open_clip_torch (for ViT-Small and other variants)
+try:
+    import clip
+    # Verify this is the OpenAI CLIP library by checking for the load function
+    if not hasattr(clip, 'load'):
+        raise ImportError("Wrong 'clip' module found - this is not OpenAI CLIP")
+    OPENAI_CLIP_AVAILABLE = True
+except ImportError as e:
+    print(f"OpenAI CLIP not available: {e}")
+    print("Install with: pip install git+https://github.com/openai/CLIP.git")
+    OPENAI_CLIP_AVAILABLE = False
+    clip = None
+
+try:
+    import open_clip
+    OPENCLIP_AVAILABLE = True
+except ImportError:
+    OPENCLIP_AVAILABLE = False
+    print("OpenCLIP not available. Install with: pip install open_clip_torch")
+from torch.utils.data import Subset
 # Set matplotlib backend to avoid GUI dependencies
 os.environ['MPLBACKEND'] = 'Agg'
 import matplotlib
@@ -257,6 +279,97 @@ class Encoder(nn.Module):
         return x
     
 
+# Add CLIP Teacher wrapper class
+class CLIPTeacher(nn.Module):
+    def __init__(self, model_name='ViT-B/32', latent_dim=128, use_openclip=False):
+        super().__init__()
+        
+        self.use_openclip = use_openclip
+        
+        if use_openclip and OPENCLIP_AVAILABLE:
+            # Use OpenCLIP for ViT-Small and other variants
+            # Load with pretrained weights
+            try:
+                # Try 'openai' pretrained first for compatibility with OpenAI models
+                self.clip_model, _, self.preprocess = open_clip.create_model_and_transforms(
+                    model_name, 
+                    pretrained='openai'
+                )
+                print(f"Loaded {model_name} with 'openai' pretrained weights")
+            except:
+                try:
+                    # Fall back to LAION pretrained weights for models not available in OpenAI
+                    self.clip_model, _, self.preprocess = open_clip.create_model_and_transforms(
+                        model_name, 
+                        pretrained='laion2b_s34b_b79k'
+                    )
+                    print(f"Loaded {model_name} with 'laion2b_s34b_b79k' pretrained weights")
+                except:
+                    # Final fallback - check what's available
+                    available = open_clip.list_pretrained()
+                    model_pretrains = [p for p in available if p[0] == model_name]
+                    if model_pretrains:
+                        pretrained = model_pretrains[0][1]  # Use first available pretrained
+                        self.clip_model, _, self.preprocess = open_clip.create_model_and_transforms(
+                            model_name, 
+                            pretrained=pretrained
+                        )
+                        print(f"Loaded {model_name} with '{pretrained}' pretrained weights")
+                    else:
+                        # No pretrained available, use random weights
+                        self.clip_model, _, self.preprocess = open_clip.create_model_and_transforms(model_name)
+                        print(f"WARNING: No pretrained weights found for {model_name}, using random initialization")
+            
+            # Get feature dimension
+            clip_dim = self.clip_model.visual.output_dim
+        elif OPENAI_CLIP_AVAILABLE and clip is not None:
+            # Use original OpenAI CLIP
+            if use_openclip:
+                print(f"OpenCLIP not available, falling back to OpenAI CLIP")
+            self.clip_model, self.preprocess = clip.load(model_name)
+            # Get CLIP's feature dimension
+            clip_dim = self.clip_model.visual.output_dim
+        else:
+            raise RuntimeError(
+                "No CLIP library available. Please install one of:\n"
+                "- OpenAI CLIP: pip install git+https://github.com/openai/CLIP.git\n"
+                "- OpenCLIP: pip install open_clip_torch"
+            )
+        
+        # Freeze CLIP parameters
+        for param in self.clip_model.parameters():
+            param.requires_grad = False
+        
+        self.clip_model.eval()
+        
+        # Add projection layer to match your latent_dim
+        self.projection = nn.Linear(clip_dim, latent_dim)
+        
+        # Add resize transform for CLIP input - CLIP expects 224x224 images
+        self.resize_transform = transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC)
+        
+    def forward(self, x):
+        # x should be in range [-1, 1], convert to [0, 1] and then normalize for CLIP
+        x = (x + 1) / 2  # Convert from [-1, 1] to [0, 1]
+        
+        # Resize images to CLIP's expected input size (224x224)
+        x = self.resize_transform(x)
+        
+        # CLIP expects specific normalization
+        mean = torch.tensor([0.48145466, 0.4578275, 0.40821073]).to(x.device)
+        std = torch.tensor([0.26862954, 0.26130258, 0.27577711]).to(x.device)
+        
+        x = (x - mean.view(1, 3, 1, 1)) / std.view(1, 3, 1, 1)
+        
+        with torch.no_grad():
+            # Both OpenAI CLIP and OpenCLIP use the same encode_image method
+            features = self.clip_model.encode_image(x)
+            features = features.float()  # Convert from half precision if needed
+        
+        # Project to target dimension
+        features = self.projection(features)
+        return features
+
 # Modify training function
 def train_ebm_gan(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -268,26 +381,28 @@ def train_ebm_gan(args):
     # Data preprocessing
     if args.dataset == 'cifar10':
         transform = transforms.Compose([
-            transforms.RandomResizedCrop(32, scale=(0.2, 1.0)),
             transforms.RandomHorizontalFlip(),
-            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], 
                                 std=[0.5, 0.5, 0.5])
         ])
+        
         
         transform = MultiViewTransform(transform,n_views=2)
         
         # Load CIFAR-10 dataset
         trainset = torchvision.datasets.CIFAR10(root=args.data_path, train=True,
                                               download=True, transform=transform)
+        
+        # Filter the dataset for specific class if specified
+        if args.cls != -1:
+            class_indices = [i for i, target in enumerate(trainset.targets) if target == args.cls]
+            trainset = Subset(trainset, class_indices)
+            
     elif args.dataset == 'imagenet100':  # imagenet100
         transform = transforms.Compose([
-            transforms.RandomResizedCrop(args.img_size, scale=(0.2, 1.0)),
+            transforms.RandomResizedCrop(args.img_size),
             transforms.RandomHorizontalFlip(),
-            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], 
                                std=[0.229, 0.224, 0.225])
@@ -300,13 +415,11 @@ def train_ebm_gan(args):
             root=os.path.join(args.data_path),
             transform=transform
         )
-    
-    # Filter the dataset to only include class 1
-    if args.cls!=-1:
-        class_1_indices = [i for i, label in enumerate(trainset.targets) if label == args.cls]
-        trainset.data = trainset.data[class_1_indices]
-        trainset.targets = [trainset.targets[i] for i in class_1_indices]
-    
+        
+        # Filter the dataset for specific class if specified
+        if args.cls != -1:
+            class_indices = [i for i, (_, target) in enumerate(trainset.samples) if target == args.cls]
+            trainset = Subset(trainset, class_indices)
 
     trainloader = DataLoader(trainset, batch_size=args.batch_size,
                            shuffle=True, num_workers=args.num_workers)
@@ -315,8 +428,16 @@ def train_ebm_gan(args):
     generator = Decoder(latent_dim=args.latent_dim).to(device)
     # discriminator = ResNetEnergyNet(img_channels=3, hidden_dim=64).to(device)
     discriminator = Encoder(latent_dim=args.latent_dim).to(device)
-    teacher_discriminator = Encoder(latent_dim=args.latent_dim).to(device)
-    teacher_discriminator.load_state_dict(discriminator.state_dict())
+    
+    # Replace teacher with CLIP model
+    teacher_discriminator = CLIPTeacher(
+        model_name=args.clip_model, 
+        latent_dim=args.latent_dim, 
+        use_openclip=args.use_openclip
+    ).to(device)
+    
+    clip_type = "OpenCLIP" if args.use_openclip else "OpenAI CLIP"
+    print(f"Using {clip_type} model: {args.clip_model} as teacher")
 
     # Optimizers
     g_optimizer = torch.optim.Adam(
@@ -356,7 +477,9 @@ def train_ebm_gan(args):
             checkpoint = torch.load(checkpoint_path)
             generator.load_state_dict(checkpoint['generator_state_dict'])
             discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
-            teacher_discriminator.load_state_dict(checkpoint['teacher_discriminator_state_dict'])
+            # Only load the projection layer for CLIP teacher
+            if 'teacher_projection_state_dict' in checkpoint:
+                teacher_discriminator.projection.load_state_dict(checkpoint['teacher_projection_state_dict'])
             g_optimizer.load_state_dict(checkpoint['g_optimizer_state_dict'])
             d_optimizer.load_state_dict(checkpoint['d_optimizer_state_dict'])
             g_scheduler.load_state_dict(checkpoint['g_scheduler_state_dict'])
@@ -387,12 +510,13 @@ def train_ebm_gan(args):
                     z = discriminator.net(real_samples).squeeze()
                     # z = discriminator.head(z)
                     with torch.no_grad():
-                        z_anchor = teacher_discriminator.net(aug_samples.detach()).squeeze()
+                        z_anchor = teacher_discriminator(real_samples.detach()).squeeze()
                         z_anchor = z_anchor.detach()
 
 
                     
-                    z_noised = pca_noiser(z)
+                    # z_noised = pca_noiser(z)
+                    z_noised = torch.randn_like(z)
                     fake_samples,_ = generator(z_noised)
                     fake_samples = fake_samples.detach().requires_grad_(True)
                     
@@ -428,9 +552,9 @@ def train_ebm_gan(args):
                     d_loss.backward()
                     d_optimizer.step()
 
-            with torch.no_grad():
-                for param_q, param_k in zip(discriminator.parameters(), teacher_discriminator.parameters()):
-                    param_k.data = momentum * param_k.data + (1 - momentum) * param_q.data
+            # Skip EMA update for CLIP teacher since its parameters are frozen
+            # The CLIP teacher uses fixed pretrained features, no EMA needed
+            pass
 
             # Train Generator
             g_optimizer.zero_grad()
@@ -441,11 +565,11 @@ def train_ebm_gan(args):
                 z = discriminator.net(real_samples).squeeze()
                 # z = discriminator.head(z)
                 with torch.no_grad():
-                    z_anchor = teacher_discriminator.net(aug_samples.detach()).squeeze()
+                    z_anchor = teacher_discriminator(real_samples.detach()).squeeze()
                     z_anchor = z_anchor.detach()
                     
                 # z_noised = pca_noiser(z)
-                z_noised = pca_noiser(z)
+                z_noised = torch.randn_like(z)
                 fake_samples,_ = generator(z_noised)
 
                 z_fake = discriminator.net(fake_samples).squeeze()
@@ -495,7 +619,8 @@ def train_ebm_gan(args):
                 'epoch': epoch,
                 'generator_state_dict': generator.state_dict(),
                 'discriminator_state_dict': discriminator.state_dict(),
-                'teacher_discriminator_state_dict': teacher_discriminator.state_dict(),
+                'teacher_projection_state_dict': teacher_discriminator.projection.state_dict(),
+                'clip_model_name': args.clip_model,  # Save the CLIP model name for loading
                 'g_optimizer_state_dict': g_optimizer.state_dict(),
                 'd_optimizer_state_dict': d_optimizer.state_dict(),
                 'g_scheduler_state_dict': g_scheduler.state_dict(),
@@ -504,34 +629,40 @@ def train_ebm_gan(args):
 
 def save_gan_samples(generator, discriminator,pca_noiser, epoch, output_dir, device, n_samples=36,real_samples=None):
     generator.eval()
-    real_samples = real_samples[:n_samples]
-    batch_size = real_samples.size(0)
-    with torch.no_grad():
+    
+    # Handle case where real_samples might be None
+    if real_samples is None:
+        # Generate random samples if no real samples provided
+        with torch.no_grad():
+            z_random = torch.randn(n_samples, discriminator.latent_dim).to(device)
+            fake_samples, _ = generator(z_random)
+    else:
+        real_samples = real_samples[:n_samples]
+        batch_size = real_samples.size(0)
         
-        z = discriminator.net(real_samples.detach()).squeeze()
+        with torch.no_grad():
+            z = discriminator.net(real_samples.detach()).squeeze()
 
-        # z_noised = pca_noiser(z)
-        z_noised = pca_noiser(z)
-        fake_samples,_ = generator(z_noised)
-        
-        # Changed 'range' to 'value_range'
-        grid = make_grid(fake_samples, nrow=6, normalize=True, value_range=(-1, 1))
-        plt.figure(figsize=(10, 10))
-        plt.imshow(grid.cpu().permute(1, 2, 0))
-        plt.axis('off')
-        plt.savefig(os.path.join(output_dir, f'gan_samples_epoch_{epoch}.png'))
-
-
-        # Changed 'range' to 'value_range'
+            # z_noised = pca_noiser(z)
+            z_noised = torch.randn_like(z)
+            fake_samples,_ = generator(z_noised)
+            
+        # Save real samples too
         grid = make_grid(real_samples, nrow=6, normalize=True, value_range=(-1, 1))
         plt.figure(figsize=(10, 10))
         plt.imshow(grid.cpu().permute(1, 2, 0))
         plt.axis('off')
         plt.savefig(os.path.join(output_dir, f'gan_samples_epoch_{epoch}_real.png'))
-
-
-
         plt.close()
+        
+    # Save generated samples
+    grid = make_grid(fake_samples, nrow=6, normalize=True, value_range=(-1, 1))
+    plt.figure(figsize=(10, 10))
+    plt.imshow(grid.cpu().permute(1, 2, 0))
+    plt.axis('off')
+    plt.savefig(os.path.join(output_dir, f'gan_samples_epoch_{epoch}.png'))
+    plt.close()
+    
     generator.train()
 
 def compute_gradient_penalty(discriminator, real_samples, fake_samples, device):
@@ -566,6 +697,12 @@ def get_args_parser():
                         help='Number of discriminator updates per generator update')
     parser.add_argument('--gp_weight', default=0.05, type=float,
                         help='Weight of gradient penalty')
+    
+    # Add CLIP model parameter
+    parser.add_argument('--clip_model', default='ViT-B/32', type=str,
+                        help='CLIP model to use as teacher (ViT-B/32, ViT-B/16, ViT-L/14, etc.)')
+    parser.add_argument('--use_openclip', action='store_true',
+                        help='Use OpenCLIP instead of OpenAI CLIP (required for ViT-Small models)')
     
     # Modify learning rates
     parser.add_argument('--g_beta1', default=0.5, type=float,

@@ -1001,4 +1001,67 @@ python finetune_ctrl_ldr_knn.py \
     --latent_dim 384     \
     --use_amp     \
     --pretrained_path ../../autodl-tmp/output_ecctrl/ebm_gan_checkpoint_700.pth
+
+
+python finetune_ctrl_ldr_knn.py \
+    --latent_dim 384     \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ecctrl/ebm_gan_checkpoint_100.pth
+
+
+
+python finetune_ctrl_ldr.py \
+    --latent_dim 384     \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ecctrl/ebm_gan_checkpoint_100.pth
+
+python finetune_ctrl_ldr.py \
+    --latent_dim 384     \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ecctrl/ebm_gan_checkpoint_700.pth
+
+python finetune_ctrl_ldr_knn.py \
+    --latent_dim 128     \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ecctrl_dcgan/ebm_gan_checkpoint_10.pth
+
+
+
+
+python finetune_ctrl_vit_knn.py \
+    --latent_dim 192     \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ecctrl_vit/ebm_gan_checkpoint_40.pth \
+    --visualize_features
     
+
+
+
+python finetune_ctrl_vit_knn.py \
+    --latent_dim 192     \
+    --img_size 128 \
+    --patch_size 16 \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ecctrl_vit_in100/ebm_gan_checkpoint_10.pth \
+    --visualize_features
+    
+
+python finetune_ctrl_ldr_knn.py \
+    --latent_dim 128     \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ecctrl_dcgan/ebm_gan_checkpoint_200.pth
+
+
+python finetune_ctrl_ldr_knn.py \
+    --latent_dim 128     \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ecctrl_dcgan_random/ebm_gan_checkpoint_200.pth
+
+
+
+
+python finetune_ctrl_ldr_knn.py \
+    --latent_dim 128     \
+    --use_amp     \
+    --pretrained_path ../../autodl-tmp/output_ecctrl_dcgan_random_in100_32/ebm_gan_checkpoint_880.pth
+

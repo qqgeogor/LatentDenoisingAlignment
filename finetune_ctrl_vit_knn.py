@@ -8,7 +8,7 @@ from pathlib import Path
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
-from vit_ibot_registry import MaskedAutoencoderViT
+from vit_ibot import MaskedAutoencoderViT
 from torch.cuda.amp import autocast
 import torch.nn.functional as F
 from sklearn.decomposition import PCA
@@ -120,7 +120,7 @@ def visualize_features(features, labels, output_dir, method='both', n_components
     # t-SNE visualization
     if method in ['tsne', 'both']:
         print("Performing t-SNE...")
-        tsne = TSNE(n_components=n_components, perplexity=perplexity, n_iter=1000, verbose=1)
+        tsne = TSNE(n_components=n_components, perplexity=perplexity, max_iter=1000, verbose=1)
         reduced_features = tsne.fit_transform(features)
         
         plt.figure(figsize=(10, 8))
@@ -204,8 +204,7 @@ def evaluate_model(args):
         mlp_ratio=args.mlp_ratio,
         norm_layer=nn.LayerNorm,
         norm_pix_loss=args.norm_pix_loss,
-        use_checkpoint=False,
-        num_register_tokens=args.num_register_tokens
+        use_checkpoint=False
     ).to(device)
     
     if args.pretrained_path:    
@@ -310,7 +309,7 @@ def get_args_parser():
                        help='Depth of the model')
     parser.add_argument('--num_heads', type=int, default=3,
                        help='Number of attention heads')
-    parser.add_argument('--decoder_embed_dim', type=int, default=192,
+    parser.add_argument('--decoder_embed_dim', type=int, default=96,
                        help='Decoder embedding dimension')
     parser.add_argument('--decoder_depth', type=int, default=0,
                        help='Decoder depth')

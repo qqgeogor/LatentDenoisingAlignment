@@ -268,14 +268,12 @@ def train_ebm_gan(args):
     # Data preprocessing
     if args.dataset == 'cifar10':
         transform = transforms.Compose([
-            transforms.RandomResizedCrop(32, scale=(0.2, 1.0)),
             transforms.RandomHorizontalFlip(),
-            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], 
                                 std=[0.5, 0.5, 0.5])
         ])
+        
         
         transform = MultiViewTransform(transform,n_views=2)
         
@@ -284,10 +282,8 @@ def train_ebm_gan(args):
                                               download=True, transform=transform)
     elif args.dataset == 'imagenet100':  # imagenet100
         transform = transforms.Compose([
-            transforms.RandomResizedCrop(args.img_size, scale=(0.2, 1.0)),
+            transforms.RandomResizedCrop(args.img_size),
             transforms.RandomHorizontalFlip(),
-            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], 
                                std=[0.229, 0.224, 0.225])
@@ -387,12 +383,13 @@ def train_ebm_gan(args):
                     z = discriminator.net(real_samples).squeeze()
                     # z = discriminator.head(z)
                     with torch.no_grad():
-                        z_anchor = teacher_discriminator.net(aug_samples.detach()).squeeze()
+                        z_anchor = teacher_discriminator.net(real_samples.detach()).squeeze()
                         z_anchor = z_anchor.detach()
 
 
                     
-                    z_noised = pca_noiser(z)
+                    # z_noised = pca_noiser(z)
+                    z_noised = torch.randn_like(z)
                     fake_samples,_ = generator(z_noised)
                     fake_samples = fake_samples.detach().requires_grad_(True)
                     
@@ -441,11 +438,11 @@ def train_ebm_gan(args):
                 z = discriminator.net(real_samples).squeeze()
                 # z = discriminator.head(z)
                 with torch.no_grad():
-                    z_anchor = teacher_discriminator.net(aug_samples.detach()).squeeze()
+                    z_anchor = teacher_discriminator.net(real_samples.detach()).squeeze()
                     z_anchor = z_anchor.detach()
                     
                 # z_noised = pca_noiser(z)
-                z_noised = pca_noiser(z)
+                z_noised = torch.randn_like(z)
                 fake_samples,_ = generator(z_noised)
 
                 z_fake = discriminator.net(fake_samples).squeeze()
@@ -511,7 +508,7 @@ def save_gan_samples(generator, discriminator,pca_noiser, epoch, output_dir, dev
         z = discriminator.net(real_samples.detach()).squeeze()
 
         # z_noised = pca_noiser(z)
-        z_noised = pca_noiser(z)
+        z_noised = torch.randn_like(z)
         fake_samples,_ = generator(z_noised)
         
         # Changed 'range' to 'value_range'
